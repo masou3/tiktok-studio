@@ -2,6 +2,8 @@ import Link from "next/link";
 import { listProjects } from "@/lib/store";
 import NewProjectForm from "./new-project-form";
 
+export const dynamic = "force-dynamic";
+
 export default async function HomePage() {
   const projects = await listProjects();
 
@@ -18,16 +20,7 @@ export default async function HomePage() {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 16 }}>
           {projects.map((p) => (
             <Link key={p.id} href={`/projects/${p.id}`}>
-              <div
-                className="card"
-                style={{ cursor: "pointer", transition: "border-color 0.15s" }}
-                onMouseEnter={(e) =>
-                  ((e.currentTarget as HTMLDivElement).style.borderColor = "var(--accent)")
-                }
-                onMouseLeave={(e) =>
-                  ((e.currentTarget as HTMLDivElement).style.borderColor = "var(--border)")
-                }
-              >
+              <div className="card project-card">
                 <div
                   style={{
                     width: "100%",
