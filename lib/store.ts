@@ -1,135 +1,175 @@
-// Local JSON store for v1. Lives in data/projects.json.
-import { promises as fs } from "fs";
-import path from "path";
-import { randomUUID } from "crypto";
+// Supabase REST store — replaces the local JSON file store.
 import type { Project, Clip } from "./types";
 
-const FILE = path.join(process.cwd(), "data", "projects.json");
+const BASE = process.env.SUPABASE_URL!;
+const KEY  = process.env.SUPABASE_ANON_KEY!;
 
-async function readAll(): Promise<Project[]> {
-  try {
-    const raw = await fs.readFile(FILE, "utf8");
-    const projects = JSON.parse(raw) as Project[];
-    // Backfill clips array for old records
-    return projects.map((p) => ({ ...p, clips: p.clips ?? [] }));
-  } catch {
-    return [];
+function headers() {
+  return {
+    "Content-Type": "application/json",
+    "apikey": KEY,
+    "Authorization": `Bearer ${KEY}`,
+    "Prefer": "return=representation",
+  };
+}
+
+async function q(path: string, init?: RequestInit) {
+  const res = await fetch(`${BASE}/rest/v1${path}`, { ...init, headers: { ...headers(), ...(init?.headers as object ?? {}) } });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Supabase ${res.status}: ${text}`);
   }
+  const text = await res.text();
+  return text ? JSON.parse(text) : [];
 }
 
-async function writeAll(projects: Project[]): Promise<void> {
-  await fs.mkdir(path.dirname(FILE), { recursive: true });
-  await fs.writeFile(FILE, JSON.stringify(projects, null, 2), "utf8");
+// Map DB row → Project
+function rowToProject(row: DbProject, clips: Clip[] = []): Project {
+  return {
+    id: row.id,
+    title: row.title,
+    aspect: "9:16",
+    fps: 30,
+    width: row.width,
+    height: row.height,
+    durationMs: row.duration_ms,
+    status: row.status as Project["status"],
+    aiDisclosure: row.ai_disclosure,
+    hashtags: row.hashtags ?? [],
+    clips,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
-function calcDuration(clips: Clip[]): number {
-  return clips.reduce((sum, c) => sum + c.durationMs, 0);
+function rowToClip(row: DbClip): Clip {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    order: row.order,
+    durationMs: row.duration_ms,
+    trimStartMs: row.trim_start_ms,
+    pexelsVideoId: row.pexels_video_id,
+    pexelsUrl: row.pexels_url,
+    pexelsThumbnail: row.pexels_thumbnail,
+    pexelsAuthor: row.pexels_author,
+    pexelsWidth: row.pexels_width,
+    pexelsHeight: row.pexels_height,
+  };
 }
+
+async function getClipsForProject(projectId: string): Promise<Clip[]> {
+  const rows: DbClip[] = await q(`/tiktok_clips?project_id=eq.${projectId}&order=order.asc`);
+  return rows.map(rowToClip);
+}
+
+async function recalcDuration(projectId: string): Promise<number> {
+  const clips = await getClipsForProject(projectId);
+  return clips.reduce((s, c) => s + c.durationMs, 0);
+}
+
+async function touchProject(projectId: string, durationMs?: number) {
+  const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (durationMs !== undefined) patch.duration_ms = durationMs;
+  await q(`/tiktok_projects?id=eq.${projectId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+// ---- Public API ----
 
 export async function listProjects(): Promise<Project[]> {
-  const all = await readAll();
-  return all.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const rows: DbProject[] = await q("/tiktok_projects?order=updated_at.desc");
+  const projects = await Promise.all(
+    rows.map(async (row) => {
+      const clips = await getClipsForProject(row.id);
+      return rowToProject(row, clips);
+    })
+  );
+  return projects;
 }
 
 export async function getProject(id: string): Promise<Project | null> {
-  return (await readAll()).find((p) => p.id === id) ?? null;
+  const rows: DbProject[] = await q(`/tiktok_projects?id=eq.${id}`);
+  if (!rows.length) return null;
+  const clips = await getClipsForProject(id);
+  return rowToProject(rows[0], clips);
 }
 
 export async function createProject(title: string): Promise<Project> {
-  const now = new Date().toISOString();
-  const project: Project = {
-    id: randomUUID(),
-    title: title.trim() || "Untitled video",
-    aspect: "9:16",
-    fps: 30,
-    width: 1080,
-    height: 1920,
-    durationMs: 0,
-    status: "draft",
-    aiDisclosure: false,
-    hashtags: [],
-    clips: [],
-    createdAt: now,
-    updatedAt: now,
-  };
-  const all = await readAll();
-  all.push(project);
-  await writeAll(all);
-  return project;
+  const rows: DbProject[] = await q("/tiktok_projects", {
+    method: "POST",
+    body: JSON.stringify({ title: title.trim() || "Untitled video" }),
+  });
+  return rowToProject(rows[0], []);
 }
 
 export async function updateProject(
   id: string,
   patch: Partial<Pick<Project, "title" | "aiDisclosure" | "hashtags">>,
 ): Promise<Project | null> {
-  const all = await readAll();
-  const i = all.findIndex((p) => p.id === id);
-  if (i === -1) return null;
-  all[i] = { ...all[i], ...patch, updatedAt: new Date().toISOString() };
-  await writeAll(all);
-  return all[i];
+  const dbPatch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (patch.title !== undefined) dbPatch.title = patch.title;
+  if (patch.aiDisclosure !== undefined) dbPatch.ai_disclosure = patch.aiDisclosure;
+  if (patch.hashtags !== undefined) dbPatch.hashtags = patch.hashtags;
+  await q(`/tiktok_projects?id=eq.${id}`, { method: "PATCH", body: JSON.stringify(dbPatch) });
+  return getProject(id);
 }
 
 export async function deleteProject(id: string): Promise<boolean> {
-  const all = await readAll();
-  const next = all.filter((p) => p.id !== id);
-  if (next.length === all.length) return false;
-  await writeAll(next);
+  await q(`/tiktok_projects?id=eq.${id}`, { method: "DELETE" });
   return true;
 }
-
-// --- Clip operations ---
 
 export async function addClip(
   projectId: string,
   clip: Omit<Clip, "id" | "projectId" | "order">,
 ): Promise<Project | null> {
-  const all = await readAll();
-  const i = all.findIndex((p) => p.id === projectId);
-  if (i === -1) return null;
-  const newClip: Clip = {
-    ...clip,
-    id: randomUUID(),
-    projectId,
-    order: all[i].clips.length,
-  };
-  all[i].clips.push(newClip);
-  all[i].durationMs = calcDuration(all[i].clips);
-  all[i].updatedAt = new Date().toISOString();
-  await writeAll(all);
-  return all[i];
+  const existing = await getClipsForProject(projectId);
+  const order = existing.length;
+  await q("/tiktok_clips", {
+    method: "POST",
+    body: JSON.stringify({
+      project_id: projectId,
+      order,
+      duration_ms: clip.durationMs,
+      trim_start_ms: clip.trimStartMs,
+      pexels_video_id: clip.pexelsVideoId,
+      pexels_url: clip.pexelsUrl,
+      pexels_thumbnail: clip.pexelsThumbnail,
+      pexels_author: clip.pexelsAuthor,
+      pexels_width: clip.pexelsWidth,
+      pexels_height: clip.pexelsHeight,
+    }),
+  });
+  const dur = await recalcDuration(projectId);
+  await touchProject(projectId, dur);
+  return getProject(projectId);
 }
 
-export async function removeClip(
-  projectId: string,
-  clipId: string,
-): Promise<Project | null> {
-  const all = await readAll();
-  const i = all.findIndex((p) => p.id === projectId);
-  if (i === -1) return null;
-  all[i].clips = all[i].clips
-    .filter((c) => c.id !== clipId)
-    .map((c, idx) => ({ ...c, order: idx }));
-  all[i].durationMs = calcDuration(all[i].clips);
-  all[i].updatedAt = new Date().toISOString();
-  await writeAll(all);
-  return all[i];
+export async function removeClip(projectId: string, clipId: string): Promise<Project | null> {
+  await q(`/tiktok_clips?id=eq.${clipId}`, { method: "DELETE" });
+  // Re-number remaining clips
+  const remaining = await getClipsForProject(projectId);
+  await Promise.all(
+    remaining.map((c, idx) =>
+      q(`/tiktok_clips?id=eq.${c.id}`, { method: "PATCH", body: JSON.stringify({ order: idx }) })
+    )
+  );
+  const dur = await recalcDuration(projectId);
+  await touchProject(projectId, dur);
+  return getProject(projectId);
 }
 
-export async function reorderClips(
-  projectId: string,
-  orderedIds: string[],
-): Promise<Project | null> {
-  const all = await readAll();
-  const i = all.findIndex((p) => p.id === projectId);
-  if (i === -1) return null;
-  const map = new Map(all[i].clips.map((c) => [c.id, c]));
-  all[i].clips = orderedIds
-    .filter((id) => map.has(id))
-    .map((id, idx) => ({ ...map.get(id)!, order: idx }));
-  all[i].updatedAt = new Date().toISOString();
-  await writeAll(all);
-  return all[i];
+export async function reorderClips(projectId: string, orderedIds: string[]): Promise<Project | null> {
+  await Promise.all(
+    orderedIds.map((id, idx) =>
+      q(`/tiktok_clips?id=eq.${id}`, { method: "PATCH", body: JSON.stringify({ order: idx }) })
+    )
+  );
+  await touchProject(projectId);
+  return getProject(projectId);
 }
 
 export async function trimClip(
@@ -137,14 +177,24 @@ export async function trimClip(
   clipId: string,
   patch: Partial<Pick<Clip, "durationMs" | "trimStartMs">>,
 ): Promise<Project | null> {
-  const all = await readAll();
-  const i = all.findIndex((p) => p.id === projectId);
-  if (i === -1) return null;
-  const ci = all[i].clips.findIndex((c) => c.id === clipId);
-  if (ci === -1) return null;
-  all[i].clips[ci] = { ...all[i].clips[ci], ...patch };
-  all[i].durationMs = calcDuration(all[i].clips);
-  all[i].updatedAt = new Date().toISOString();
-  await writeAll(all);
-  return all[i];
+  const dbPatch: Record<string, unknown> = {};
+  if (patch.durationMs !== undefined) dbPatch.duration_ms = patch.durationMs;
+  if (patch.trimStartMs !== undefined) dbPatch.trim_start_ms = patch.trimStartMs;
+  await q(`/tiktok_clips?id=eq.${clipId}`, { method: "PATCH", body: JSON.stringify(dbPatch) });
+  const dur = await recalcDuration(projectId);
+  await touchProject(projectId, dur);
+  return getProject(projectId);
 }
+
+// ---- DB row types ----
+type DbProject = {
+  id: string; title: string; width: number; height: number;
+  duration_ms: number; status: string; ai_disclosure: boolean;
+  hashtags: string[]; created_at: string; updated_at: string;
+};
+type DbClip = {
+  id: string; project_id: string; order: number;
+  duration_ms: number; trim_start_ms: number;
+  pexels_video_id: number; pexels_url: string; pexels_thumbnail: string;
+  pexels_author: string; pexels_width: number; pexels_height: number;
+};
