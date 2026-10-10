@@ -6,5 +6,5 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
   const { id } = await params;
   const project = await getProject(id);
   if (!project) notFound();
-  return <EditorShell project={project} />;
+  return <EditorShell project={project!} />;
 }
