@@ -1,30 +1,24 @@
-// Supabase REST store — replaces the local JSON file store.
-import type { Project, Clip } from "./types";
+// Supabase REST store — no SDK, plain fetch.
+// Set SUPABASE_URL and SUPABASE_ANON_KEY in .env.local
+// RLS must be disabled (or policies set to allow all) on tiktok_projects and tiktok_clips.
+
+import type { Clip, Project } from "./types";
 
 const BASE = process.env.SUPABASE_URL!;
-const KEY  = process.env.SUPABASE_ANON_KEY!;
+const KEY = process.env.SUPABASE_ANON_KEY!;
 
-function headers() {
+function headers(extra?: Record<string, string>) {
   return {
+    apikey: KEY,
+    Authorization: `Bearer ${KEY}`,
     "Content-Type": "application/json",
-    "apikey": KEY,
-    "Authorization": `Bearer ${KEY}`,
-    "Prefer": "return=representation",
+    Prefer: "return=representation",
+    ...extra,
   };
 }
 
-async function q(path: string, init?: RequestInit) {
-  const res = await fetch(`${BASE}/rest/v1${path}`, { ...init, headers: { ...headers(), ...(init?.headers as object ?? {}) } });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Supabase ${res.status}: ${text}`);
-  }
-  const text = await res.text();
-  return text ? JSON.parse(text) : [];
-}
-
-// Map DB row → Project
-function rowToProject(row: DbProject, clips: Clip[] = []): Project {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function rowToProject(row: any): Project {
   return {
     id: row.id,
     title: row.title,
@@ -32,173 +26,186 @@ function rowToProject(row: DbProject, clips: Clip[] = []): Project {
     fps: 30,
     width: 1080,
     height: 1920,
-    durationMs: row.duration_ms,
-    status: row.status as Project["status"],
-    aiDisclosure: row.ai_disclosure,
+    durationMs: row.duration_ms ?? 0,
+    status: row.status ?? "draft",
+    aiDisclosure: row.ai_disclosure ?? false,
     hashtags: row.hashtags ?? [],
+    clips: [],
     voiceoverScript: row.voiceover_script ?? "",
     voiceoverUrl: row.voiceover_url ?? "",
-    clips,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
-function rowToClip(row: DbClip): Clip {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function rowToClip(row: any): Clip {
   return {
     id: row.id,
     projectId: row.project_id,
     order: row.order,
     durationMs: row.duration_ms,
-    trimStartMs: row.trim_start_ms,
+    trimStartMs: row.trim_start_ms ?? 0,
     pexelsVideoId: row.pexels_video_id,
     pexelsUrl: row.pexels_url,
     pexelsThumbnail: row.pexels_thumbnail,
-    pexelsAuthor: row.pexels_author,
-    pexelsWidth: row.pexels_width,
-    pexelsHeight: row.pexels_height,
+    pexelsAuthor: row.pexels_author ?? "",
+    pexelsWidth: row.pexels_width ?? 0,
+    pexelsHeight: row.pexels_height ?? 0,
   };
 }
 
-async function getClipsForProject(projectId: string): Promise<Clip[]> {
-  const rows: DbClip[] = await q(`/tiktok_clips?project_id=eq.${projectId}&order=order.asc`);
-  return rows.map(rowToClip);
-}
-
-async function recalcDuration(projectId: string): Promise<number> {
-  const clips = await getClipsForProject(projectId);
-  return clips.reduce((s, c) => s + c.durationMs, 0);
-}
-
-async function touchProject(projectId: string, durationMs?: number) {
-  const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
-  if (durationMs !== undefined) patch.duration_ms = durationMs;
-  await q(`/tiktok_projects?id=eq.${projectId}`, {
-    method: "PATCH",
-    body: JSON.stringify(patch),
-  });
-}
-
-// ---- Public API ----
-
 export async function listProjects(): Promise<Project[]> {
-  const rows: DbProject[] = await q("/tiktok_projects?order=updated_at.desc");
-  const projects = await Promise.all(
-    rows.map(async (row) => {
-      const clips = await getClipsForProject(row.id);
-      return rowToProject(row, clips);
-    })
+  const res = await fetch(
+    `${BASE}/rest/v1/tiktok_projects?select=*&order=updated_at.desc`,
+    { headers: headers() },
   );
-  return projects;
+  if (!res.ok) return [];
+  const rows = await res.json();
+  return rows.map(rowToProject);
 }
 
 export async function getProject(id: string): Promise<Project | null> {
-  const rows: DbProject[] = await q(`/tiktok_projects?id=eq.${id}`);
+  const res = await fetch(
+    `${BASE}/rest/v1/tiktok_projects?id=eq.${id}&select=*`,
+    { headers: headers() },
+  );
+  if (!res.ok) return null;
+  const rows = await res.json();
   if (!rows.length) return null;
-  const clips = await getClipsForProject(id);
-  return rowToProject(rows[0], clips);
+  const project = rowToProject(rows[0]);
+
+  const clipRes = await fetch(
+    `${BASE}/rest/v1/tiktok_clips?project_id=eq.${id}&order=order.asc&select=*`,
+    { headers: headers() },
+  );
+  if (clipRes.ok) {
+    const clipRows = await clipRes.json();
+    project.clips = clipRows.map(rowToClip);
+  }
+  return project;
 }
 
 export async function createProject(title: string): Promise<Project> {
-  const rows: DbProject[] = await q("/tiktok_projects", {
+  const now = new Date().toISOString();
+  const body = {
+    title: title.trim() || "Untitled video",
+    status: "draft",
+    ai_disclosure: false,
+    hashtags: [],
+    duration_ms: 0,
+    voiceover_script: "",
+    voiceover_url: "",
+    created_at: now,
+    updated_at: now,
+  };
+  const res = await fetch(`${BASE}/rest/v1/tiktok_projects`, {
     method: "POST",
-    body: JSON.stringify({ title: title.trim() || "Untitled video" }),
+    headers: headers(),
+    body: JSON.stringify(body),
   });
-  return rowToProject(rows[0], []);
+  if (!res.ok) throw new Error(`Supabase error: ${await res.text()}`);
+  const rows = await res.json();
+  return rowToProject(Array.isArray(rows) ? rows[0] : rows);
 }
 
 export async function updateProject(
   id: string,
-  patch: Partial<Pick<Project, "title" | "aiDisclosure" | "hashtags" | "voiceoverScript" | "voiceoverUrl">>,
+  patch: Partial<Pick<Project, "title" | "aiDisclosure" | "hashtags" | "durationMs" | "voiceoverScript" | "voiceoverUrl">>,
 ): Promise<Project | null> {
-  const dbPatch: Record<string, unknown> = { updated_at: new Date().toISOString() };
-  if (patch.title !== undefined) dbPatch.title = patch.title;
-  if (patch.aiDisclosure !== undefined) dbPatch.ai_disclosure = patch.aiDisclosure;
-  if (patch.hashtags !== undefined) dbPatch.hashtags = patch.hashtags;
-  if (patch.voiceoverScript !== undefined) dbPatch.voiceover_script = patch.voiceoverScript;
-  if (patch.voiceoverUrl !== undefined) dbPatch.voiceover_url = patch.voiceoverUrl;
-  await q(`/tiktok_projects?id=eq.${id}`, { method: "PATCH", body: JSON.stringify(dbPatch) });
-  return getProject(id);
+  const body: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (typeof patch.title === "string") body.title = patch.title.trim() || "Untitled video";
+  if (typeof patch.aiDisclosure === "boolean") body.ai_disclosure = patch.aiDisclosure;
+  if (Array.isArray(patch.hashtags)) body.hashtags = patch.hashtags;
+  if (typeof patch.durationMs === "number") body.duration_ms = patch.durationMs;
+  if (typeof patch.voiceoverScript === "string") body.voiceover_script = patch.voiceoverScript;
+  if (typeof patch.voiceoverUrl === "string") body.voiceover_url = patch.voiceoverUrl;
+
+  const res = await fetch(`${BASE}/rest/v1/tiktok_projects?id=eq.${id}`, {
+    method: "PATCH",
+    headers: headers(),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) return null;
+  const rows = await res.json();
+  return rowToProject(Array.isArray(rows) ? rows[0] : rows);
 }
 
 export async function deleteProject(id: string): Promise<boolean> {
-  await q(`/tiktok_projects?id=eq.${id}`, { method: "DELETE" });
-  return true;
+  const res = await fetch(`${BASE}/rest/v1/tiktok_projects?id=eq.${id}`, {
+    method: "DELETE",
+    headers: headers(),
+  });
+  return res.ok;
 }
 
 export async function addClip(
   projectId: string,
   clip: Omit<Clip, "id" | "projectId" | "order">,
-): Promise<Project | null> {
-  const existing = await getClipsForProject(projectId);
-  const order = existing.length;
-  await q("/tiktok_clips", {
+): Promise<Clip> {
+  const ordRes = await fetch(
+    `${BASE}/rest/v1/tiktok_clips?project_id=eq.${projectId}&select=order&order=order.desc&limit=1`,
+    { headers: headers() },
+  );
+  const ordRows = ordRes.ok ? await ordRes.json() : [];
+  const nextOrder = ordRows.length ? ordRows[0].order + 1 : 0;
+
+  const body = {
+    project_id: projectId,
+    order: nextOrder,
+    duration_ms: clip.durationMs,
+    trim_start_ms: clip.trimStartMs ?? 0,
+    pexels_video_id: clip.pexelsVideoId,
+    pexels_url: clip.pexelsUrl,
+    pexels_thumbnail: clip.pexelsThumbnail,
+    pexels_author: clip.pexelsAuthor ?? "",
+    pexels_width: clip.pexelsWidth ?? 0,
+    pexels_height: clip.pexelsHeight ?? 0,
+  };
+  const res = await fetch(`${BASE}/rest/v1/tiktok_clips`, {
     method: "POST",
-    body: JSON.stringify({
-      project_id: projectId,
-      order,
-      duration_ms: clip.durationMs,
-      trim_start_ms: clip.trimStartMs,
-      pexels_video_id: clip.pexelsVideoId,
-      pexels_url: clip.pexelsUrl,
-      pexels_thumbnail: clip.pexelsThumbnail,
-      pexels_author: clip.pexelsAuthor,
-      pexels_width: clip.pexelsWidth,
-      pexels_height: clip.pexelsHeight,
-    }),
+    headers: headers(),
+    body: JSON.stringify(body),
   });
-  const dur = await recalcDuration(projectId);
-  await touchProject(projectId, dur);
-  return getProject(projectId);
+  if (!res.ok) throw new Error(`Supabase clip insert error: ${await res.text()}`);
+  const rows = await res.json();
+  return rowToClip(Array.isArray(rows) ? rows[0] : rows);
 }
 
-export async function removeClip(projectId: string, clipId: string): Promise<Project | null> {
-  await q(`/tiktok_clips?id=eq.${clipId}`, { method: "DELETE" });
-  // Re-number remaining clips
-  const remaining = await getClipsForProject(projectId);
-  await Promise.all(
-    remaining.map((c, idx) =>
-      q(`/tiktok_clips?id=eq.${c.id}`, { method: "PATCH", body: JSON.stringify({ order: idx }) })
-    )
-  );
-  const dur = await recalcDuration(projectId);
-  await touchProject(projectId, dur);
-  return getProject(projectId);
+export async function removeClip(clipId: string): Promise<boolean> {
+  const res = await fetch(`${BASE}/rest/v1/tiktok_clips?id=eq.${clipId}`, {
+    method: "DELETE",
+    headers: headers(),
+  });
+  return res.ok;
 }
 
-export async function reorderClips(projectId: string, orderedIds: string[]): Promise<Project | null> {
+export async function reorderClips(
+  projectId: string,
+  orderedIds: string[],
+): Promise<void> {
   await Promise.all(
-    orderedIds.map((id, idx) =>
-      q(`/tiktok_clips?id=eq.${id}`, { method: "PATCH", body: JSON.stringify({ order: idx }) })
-    )
+    orderedIds.map((id, i) =>
+      fetch(`${BASE}/rest/v1/tiktok_clips?id=eq.${id}`, {
+        method: "PATCH",
+        headers: headers(),
+        body: JSON.stringify({ order: i }),
+      }),
+    ),
   );
-  await touchProject(projectId);
-  return getProject(projectId);
 }
 
 export async function trimClip(
-  projectId: string,
   clipId: string,
-  patch: Partial<Pick<Clip, "durationMs" | "trimStartMs">>,
-): Promise<Project | null> {
-  const dbPatch: Record<string, unknown> = {};
-  if (patch.durationMs !== undefined) dbPatch.duration_ms = patch.durationMs;
-  if (patch.trimStartMs !== undefined) dbPatch.trim_start_ms = patch.trimStartMs;
-  await q(`/tiktok_clips?id=eq.${clipId}`, { method: "PATCH", body: JSON.stringify(dbPatch) });
-  const dur = await recalcDuration(projectId);
-  await touchProject(projectId, dur);
-  return getProject(projectId);
+  trimStartMs: number,
+  durationMs: number,
+): Promise<Clip | null> {
+  const res = await fetch(`${BASE}/rest/v1/tiktok_clips?id=eq.${clipId}`, {
+    method: "PATCH",
+    headers: headers(),
+    body: JSON.stringify({ trim_start_ms: trimStartMs, duration_ms: durationMs }),
+  });
+  if (!res.ok) return null;
+  const rows = await res.json();
+  return rowToClip(Array.isArray(rows) ? rows[0] : rows);
 }
-
-// ---- DB row types ----
-type DbProject = {
-  id: string; title: string; width: number; height: number;
-  duration_ms: number; status: string; ai_disclosure: boolean;
-  hashtags: string[]; voiceover_script: string; voiceover_url: string; created_at: string; updated_at: string;
-};
-type DbClip = {
-  id: string; project_id: string; order: number;
-  duration_ms: number; trim_start_ms: number;
-  pexels_video_id: number; pexels_url: string; pexels_thumbnail: string;
-  pexels_author: string; pexels_width: number; pexels_height: number;
-};

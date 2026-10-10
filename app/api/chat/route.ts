@@ -1,43 +1,49 @@
-import { NextRequest } from "next/server";
+import { NextResponse } from "next/server";
 
-export async function POST(req: NextRequest) {
-  const { messages, projectContext } = await req.json();
+export async function POST(req: Request) {
+  const body = await req.json().catch(() => ({})) as {
+    messages: { role: string; content: string }[];
+    projectTitle?: string;
+    clipsCount?: number;
+  };
 
-  const systemPrompt = `You are a TikTok video producer helping create short-form vertical videos.
-The user is editing a project with the following context:
-${JSON.stringify(projectContext, null, 2)}
+  const systemPrompt = `You are a creative video producer helping build a TikTok short-form video.
+Current project: "${body.projectTitle ?? "Untitled"}" with ${body.clipsCount ?? 0} clips.
 
-Help them with:
-- Writing hooks and scripts for voiceovers
-- Suggesting what stock footage to search for
-- Recommending video structure and pacing
-- Writing captions and on-screen text
+Help the user with:
+- Suggesting video concepts and structure
+- Writing engaging scripts and voiceover copy
+- Choosing visual themes and clip ideas to search for
+- Pacing advice (typical TikTok: hook in 0-3s, value in 3-25s, CTA at end)
+- Caption and hashtag suggestions
 
-Keep responses concise and practical. When you suggest a voiceover script, wrap it in <voiceover> tags so it can be extracted.`;
+When writing a voiceover script, wrap it in <voiceover> tags like:
+<voiceover>
+[The full script text here, spoken naturally, no stage directions]
+</voiceover>
+
+Keep responses concise -- this is a creative tool, not a lecture.`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
       "x-api-key": process.env.ANTHROPIC_API_KEY!,
       "anthropic-version": "2023-06-01",
-      "anthropic-beta": "messages-2023-06-01",
+      "content-type": "application/json",
     },
     body: JSON.stringify({
       model: "claude-haiku-20240307",
       max_tokens: 1024,
       system: systemPrompt,
-      messages,
+      messages: body.messages,
       stream: true,
     }),
   });
 
   if (!res.ok) {
-    const err = await res.text();
-    return new Response(JSON.stringify({ error: err }), { status: res.status });
+    return NextResponse.json({ error: "Anthropic error" }, { status: res.status });
   }
 
-  // Stream the response back
   return new Response(res.body, {
     headers: {
       "Content-Type": "text/event-stream",

@@ -1,65 +1,61 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import {
+  deleteProject,
   getProject,
   updateProject,
-  deleteProject,
   addClip,
   removeClip,
   reorderClips,
   trimClip,
 } from "@/lib/store";
 
-export async function GET(
-  _req: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
+type Ctx = { params: Promise<{ id: string }> };
+
+export async function GET(_req: Request, { params }: Ctx) {
   const { id } = await params;
   const project = await getProject(id);
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(project);
 }
 
-export async function PATCH(
-  req: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
+export async function PATCH(req: Request, { params }: Ctx) {
   const { id } = await params;
-  const body = await req.json();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const body = (await req.json().catch(() => ({}))) as any;
 
-  // Clip operations
   if (body.action === "addClip") {
-    const project = await addClip(id, body.clip);
-    if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
-    return NextResponse.json(project);
+    const clip = await addClip(id, body.clip);
+    return NextResponse.json(clip, { status: 201 });
   }
   if (body.action === "removeClip") {
-    const project = await removeClip(id, body.clipId);
-    if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    await removeClip(body.clipId as string);
+    const project = await getProject(id);
     return NextResponse.json(project);
   }
   if (body.action === "reorderClips") {
-    const project = await reorderClips(id, body.orderedIds);
-    if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    await reorderClips(id, body.orderedIds as string[]);
+    const project = await getProject(id);
     return NextResponse.json(project);
   }
   if (body.action === "trimClip") {
-    const project = await trimClip(id, body.clipId, body.patch);
-    if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
-    return NextResponse.json(project);
+    const clip = await trimClip(body.clipId, body.trimStartMs, body.durationMs);
+    return NextResponse.json(clip);
   }
 
-  // Project metadata update
-  const project = await updateProject(id, body);
+  const project = await updateProject(id, {
+    ...(typeof body.title === "string" ? { title: body.title.trim() || "Untitled video" } : {}),
+    ...(typeof body.aiDisclosure === "boolean" ? { aiDisclosure: body.aiDisclosure } : {}),
+    ...(Array.isArray(body.hashtags) ? { hashtags: body.hashtags.map(String) } : {}),
+    ...(typeof body.voiceoverScript === "string" ? { voiceoverScript: body.voiceoverScript } : {}),
+    ...(typeof body.voiceoverUrl === "string" ? { voiceoverUrl: body.voiceoverUrl } : {}),
+  });
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(project);
 }
 
-export async function DELETE(
-  _req: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
+export async function DELETE(_req: Request, { params }: Ctx) {
   const { id } = await params;
   const ok = await deleteProject(id);
   if (!ok) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  return NextResponse.json({ ok: true });
+  return new NextResponse(null, { status: 204 });
 }
