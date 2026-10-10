@@ -32,7 +32,7 @@ Keep responses concise -- this is a creative tool, not a lecture.`;
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: "claude-haiku-20240307",
+      model: process.env.ANTHROPIC_MODEL ?? "claude-haiku-4-5",
       max_tokens: 1024,
       system: systemPrompt,
       messages: body.messages,
@@ -41,7 +41,9 @@ Keep responses concise -- this is a creative tool, not a lecture.`;
   });
 
   if (!res.ok) {
-    return NextResponse.json({ error: "Anthropic error" }, { status: res.status });
+    const detail = await res.text().catch(() => "");
+    console.error("Anthropic error", res.status, detail);
+    return NextResponse.json({ error: "Anthropic error", detail }, { status: res.status });
   }
 
   return new Response(res.body, {

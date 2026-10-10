@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-const VOICE_ID = "21m00Tcm4TlvDq8ikWAM";
+const VOICE_ID = process.env.ELEVENLABS_VOICE_ID ?? "21m00Tcm4TlvDq8ikWAM";
 
 export async function POST(req: Request) {
   const { text } = await req.json().catch(() => ({})) as { text?: string };
@@ -19,14 +19,16 @@ export async function POST(req: Request) {
       },
       body: JSON.stringify({
         text,
-        model_id: "eleven_turbo_v2",
+        model_id: process.env.ELEVENLABS_MODEL ?? "eleven_flash_v2_5",
         voice_settings: { stability: 0.5, similarity_boost: 0.75 },
       }),
     },
   );
 
   if (!res.ok) {
-    return NextResponse.json({ error: "ElevenLabs error" }, { status: res.status });
+    const detail = await res.text().catch(() => "");
+    console.error("ElevenLabs error", res.status, detail);
+    return NextResponse.json({ error: "ElevenLabs error", detail }, { status: res.status });
   }
 
   const buffer = await res.arrayBuffer();
