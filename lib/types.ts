@@ -2,15 +2,19 @@ export type Clip = {
   id: string;
   projectId: string;
   order: number;
-  durationMs: number;     // trimmed duration in ms
-  trimStartMs: number;    // offset into source video
-  // Pexels source
+  durationMs: number;
+  trimStartMs: number;
   pexelsVideoId: number;
-  pexelsUrl: string;      // direct .mp4 URL (HD)
+  pexelsUrl: string;
   pexelsThumbnail: string;
   pexelsAuthor: string;
   pexelsWidth: number;
   pexelsHeight: number;
+};
+
+export type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
 };
 
 export type Project = {
@@ -25,6 +29,8 @@ export type Project = {
   aiDisclosure: boolean;
   hashtags: string[];
   clips: Clip[];
+  voiceoverScript: string;
+  voiceoverUrl: string;
   createdAt: string;
   updatedAt: string;
 };

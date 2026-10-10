@@ -36,6 +36,8 @@ function rowToProject(row: DbProject, clips: Clip[] = []): Project {
     status: row.status as Project["status"],
     aiDisclosure: row.ai_disclosure,
     hashtags: row.hashtags ?? [],
+    voiceoverScript: row.voiceover_script ?? "",
+    voiceoverUrl: row.voiceover_url ?? "",
     clips,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -107,12 +109,14 @@ export async function createProject(title: string): Promise<Project> {
 
 export async function updateProject(
   id: string,
-  patch: Partial<Pick<Project, "title" | "aiDisclosure" | "hashtags">>,
+  patch: Partial<Pick<Project, "title" | "aiDisclosure" | "hashtags" | "voiceoverScript" | "voiceoverUrl">>,
 ): Promise<Project | null> {
   const dbPatch: Record<string, unknown> = { updated_at: new Date().toISOString() };
   if (patch.title !== undefined) dbPatch.title = patch.title;
   if (patch.aiDisclosure !== undefined) dbPatch.ai_disclosure = patch.aiDisclosure;
   if (patch.hashtags !== undefined) dbPatch.hashtags = patch.hashtags;
+  if (patch.voiceoverScript !== undefined) dbPatch.voiceover_script = patch.voiceoverScript;
+  if (patch.voiceoverUrl !== undefined) dbPatch.voiceover_url = patch.voiceoverUrl;
   await q(`/tiktok_projects?id=eq.${id}`, { method: "PATCH", body: JSON.stringify(dbPatch) });
   return getProject(id);
 }
@@ -190,7 +194,7 @@ export async function trimClip(
 type DbProject = {
   id: string; title: string; width: number; height: number;
   duration_ms: number; status: string; ai_disclosure: boolean;
-  hashtags: string[]; created_at: string; updated_at: string;
+  hashtags: string[]; voiceover_script: string; voiceover_url: string; created_at: string; updated_at: string;
 };
 type DbClip = {
   id: string; project_id: string; order: number;
