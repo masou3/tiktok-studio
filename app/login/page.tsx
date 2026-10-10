@@ -1,8 +1,9 @@
-export default function LoginPage({
+export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: { error?: string };
+  searchParams: Promise<{ error?: string }>;
 }) {
+  const params = await searchParams;
   return (
     <div
       style={{
@@ -17,7 +18,7 @@ export default function LoginPage({
         <h1 style={{ marginBottom: 24, fontSize: 20, fontWeight: 700 }}>
           TikTok Studio
         </h1>
-        {searchParams.error && (
+        {params.error && (
           <p style={{ color: "var(--accent)", marginBottom: 16, fontSize: 13 }}>
             Wrong password.
           </p>
