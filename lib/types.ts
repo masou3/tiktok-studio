@@ -75,3 +75,26 @@ export type Project = {
   createdAt: string;
   updatedAt: string;
 };
+
+
+/** What the home screen needs to draw a project card, without the heavy voiceover and caption data. */
+export type ProjectCard = {
+  id: string;
+  title: string;
+  updatedAt: string;
+  spentCents: number;
+  clipCount: number;
+  durationMs: number;
+  hasVoice: boolean;
+  /** The first clip, used for the thumbnail. */
+  thumb: { kind: "image" | "video"; url: string } | null;
+};
+
+/** An AI clip saved for reuse across projects. */
+export type LibraryClip = {
+  id: string;
+  url: string;
+  label: string;
+  durationMs: number;
+  createdAt: string;
+};

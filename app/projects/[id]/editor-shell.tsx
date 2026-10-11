@@ -1,7 +1,7 @@
 "use client";
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import type { Project, Clip, ChatMessage, Caption, CaptionStyle, TransitionType, CaptionWord } from "@/lib/types";
+import type { Project, Clip, ChatMessage, Caption, CaptionStyle, TransitionType, CaptionWord, LibraryClip } from "@/lib/types";
 import { TRANSITIONS } from "@/lib/types";
 import { layoutClips, clipsTotalMs, fmtTime, buildCaptions, captionAt, layerAt, wordsFromScript } from "@/lib/timeline";
 
@@ -97,6 +97,15 @@ export default function EditorShell({ project: initial }: { project: Project }) 
   const audioRef = useRef<HTMLAudioElement>(null);
   const musicRef = useRef<HTMLAudioElement>(null);
   const [musicInput, setMusicInput] = useState("");
+
+  // Saved AI clips, undo history, and the two-step project delete
+  const [library, setLibrary] = useState<LibraryClip[]>([]);
+  const history = useRef<Clip[][]>([]);
+  const lastSnap = useRef(0);
+  const clipsNow = useRef<Clip[]>(initial.clips);
+  const [canUndo, setCanUndo] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const undoRef = useRef<() => void>(() => {});
   const videoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
   const tracksRef = useRef<HTMLDivElement>(null);
 
@@ -142,9 +151,71 @@ export default function EditorShell({ project: initial }: { project: Project }) 
     if (res.ok) setProject(await res.json());
   }, [project.id]);
 
+  useEffect(() => {
+    clipsNow.current = project.clips;
+  }, [project.clips]);
+
+  // Remember the clips as they are now, so Undo can put them back. Bursts of edits (a slider drag) share one snapshot.
+  const pushHistory = useCallback((always = true) => {
+    const now = Date.now();
+    if (!always && now - lastSnap.current < 1200) return;
+    lastSnap.current = now;
+    history.current = [...history.current.slice(-29), JSON.parse(JSON.stringify(clipsNow.current))];
+    setCanUndo(true);
+  }, []);
+
+  async function undo() {
+    const snap = history.current.pop();
+    setCanUndo(history.current.length > 0);
+    if (!snap) return;
+    setSaveState("saving");
+    const api = (body: Record<string, unknown>) =>
+      fetch(`/api/projects/${project.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const cur = clipsNow.current;
+    const snapIds = new Set(snap.map((c) => c.id));
+    const curIds = new Set(cur.map((c) => c.id));
+    for (const c of cur) if (!snapIds.has(c.id)) await api({ action: "removeClip", clipId: c.id });
+    const idMap: Record<string, string> = {};
+    for (const c of snap) {
+      const now = cur.find((x) => x.id === c.id);
+      if (now) {
+        idMap[c.id] = c.id;
+        if (now.durationMs !== c.durationMs || now.trimStartMs !== c.trimStartMs || now.transitionIn !== c.transitionIn || now.transitionMs !== c.transitionMs) {
+          await api({ action: "updateClip", clipId: c.id, fields: { durationMs: c.durationMs, trimStartMs: c.trimStartMs, transitionIn: c.transitionIn, transitionMs: c.transitionMs } });
+        }
+      } else if (!curIds.has(c.id)) {
+        const res = await api({
+          action: "addClip",
+          clip: {
+            durationMs: c.durationMs, trimStartMs: c.trimStartMs, sourceDurationMs: c.sourceDurationMs, source: c.source,
+            transitionIn: c.transitionIn, transitionMs: c.transitionMs, pexelsVideoId: c.pexelsVideoId, pexelsUrl: c.pexelsUrl,
+            pexelsThumbnail: c.pexelsThumbnail, pexelsAuthor: c.pexelsAuthor, pexelsWidth: c.pexelsWidth, pexelsHeight: c.pexelsHeight,
+          },
+        });
+        if (res.ok) idMap[c.id] = ((await res.json()) as Clip).id;
+      }
+    }
+    await api({ action: "reorderClips", orderedIds: snap.map((c) => idMap[c.id]).filter(Boolean) });
+    await reloadProject();
+    setSelectedClipId(null);
+    setSaveState("saved");
+  }
+  undoRef.current = undo;
+
+  const loadLibrary = useCallback(async () => {
+    const res = await fetch("/api/library", { cache: "no-store" }).catch(() => null);
+    if (res?.ok) setLibrary((await res.json()) as LibraryClip[]);
+  }, []);
+
+  async function removeFromLibrary(id: string) {
+    setLibrary((l) => l.filter((x) => x.id !== id));
+    await fetch(`/api/library?id=${id}`, { method: "DELETE" }).catch(() => null);
+  }
+
   const pendingClipFields = useRef<Record<string, Partial<Clip>>>({});
   const clipTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   function changeClip(id: string, fields: Partial<Clip>, delayMs = 500) {
+    pushHistory(false);
     setProject((p) => ({ ...p, clips: p.clips.map((c) => (c.id === id ? { ...c, ...fields } : c)) }));
     pendingClipFields.current[id] = { ...pendingClipFields.current[id], ...fields };
     clearTimeout(clipTimers.current[id]);
@@ -171,6 +242,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
   const splitRef = useRef<() => void>(() => {});
 
   async function clipAction(body: Record<string, unknown>) {
+    pushHistory();
     setSaveState("saving");
     const res = await fetch(`/api/projects/${project.id}`, {
       method: "PATCH",
@@ -261,7 +333,11 @@ export default function EditorShell({ project: initial }: { project: Project }) 
   }
 
   async function deleteProject() {
-    if (!confirm("Delete this project? This cannot be undone.")) return;
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      setTimeout(() => setConfirmDelete(false), 3500);
+      return;
+    }
     await fetch(`/api/projects/${project.id}`, { method: "DELETE" });
     router.push("/");
   }
@@ -371,6 +447,11 @@ export default function EditorShell({ project: initial }: { project: Project }) 
     async function onKey(e: KeyboardEvent) {
       const tag = document.activeElement?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === "z" || e.key === "Z")) {
+        e.preventDefault();
+        undoRef.current();
+        return;
+      }
       if (e.key === " ") {
         e.preventDefault();
         togglePlay();
@@ -392,6 +473,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
       }
       if (selectedClipId) {
         e.preventDefault();
+        pushHistory();
         setSaveState("saving");
         const res = await fetch(`/api/projects/${project.id}`, {
           method: "PATCH",
@@ -407,7 +489,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectedClipId, selectedCaptionId, project.id, project.captions, patch, togglePlay]);
+  }, [selectedClipId, selectedCaptionId, project.id, project.captions, patch, togglePlay, pushHistory]);
 
   // ---------- footage: Pexels ----------
   async function searchPexels(e: React.FormEvent) {
@@ -424,6 +506,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
 
   const addClip = useCallback(
     async (clip: Omit<Clip, "id" | "projectId" | "order" | "transitionIn" | "transitionMs">) => {
+      pushHistory();
       setSaveState("saving");
       const res = await fetch(`/api/projects/${project.id}`, {
         method: "PATCH",
@@ -431,10 +514,11 @@ export default function EditorShell({ project: initial }: { project: Project }) 
         body: JSON.stringify({ action: "addClip", clip }),
       });
       if (res.ok) await reloadProject();
+      if (res.ok && clip.source === "fal") loadLibrary();
       setSaveState("saved");
       return res.ok;
     },
-    [project.id, reloadProject],
+    [project.id, reloadProject, pushHistory, loadLibrary],
   );
 
   function addPexelsClip(v: PexelsVideo) {
@@ -463,6 +547,10 @@ export default function EditorShell({ project: initial }: { project: Project }) 
   useEffect(() => {
     setFalJobs(loadJobs(project.id));
   }, [project.id]);
+
+  useEffect(() => {
+    if (tab === "footage" && footageSource === "fal") loadLibrary();
+  }, [tab, footageSource, loadLibrary]);
 
   const updateJobs = useCallback(
     (fn: (jobs: FalJob[]) => FalJob[]) => {
@@ -547,6 +635,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
 
   // ---------- timeline drag ----------
   function onClipDragStart(e: React.DragEvent, clipId: string) {
+    pushHistory();
     dragClipId.current = clipId;
     dragTransition.current = null;
     e.dataTransfer.effectAllowed = "move";
@@ -741,9 +830,9 @@ export default function EditorShell({ project: initial }: { project: Project }) 
   const chip = { background: "var(--border)", borderRadius: 6, padding: "4px 8px", fontSize: 11, cursor: "grab", color: "var(--text)", userSelect: "none" } as const;
 
   return (
-    <div style={{ display: "flex", height: "100vh", overflow: "hidden", background: "var(--bg)" }}>
+    <div className="ed-root" style={{ display: "flex", height: "100vh", overflow: "hidden", background: "var(--bg)" }}>
       {/* ---------------- left panel ---------------- */}
-      <div style={{ width: 340, minWidth: 280, borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column", background: "var(--panel)" }}>
+      <div className="ed-left" style={{ width: 340, minWidth: 280, borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column", background: "var(--panel)" }}>
         <div className="row" style={{ padding: "10px 12px", borderBottom: "1px solid var(--border)", gap: 8 }}>
           <a href="/" aria-label="Back to projects" style={{ color: "var(--muted)", fontSize: 18, lineHeight: 1 }}>←</a>
           <input
@@ -754,7 +843,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
             style={{ flex: 1, fontWeight: 600, background: "transparent", border: "none", borderRadius: 0, padding: "2px 4px", fontSize: 14 }}
           />
           <span className="muted" style={{ fontSize: 11, whiteSpace: "nowrap" }}>{saveState === "saving" ? "Saving…" : "Saved"}</span>
-          <button onClick={deleteProject} aria-label="Delete project" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 16 }} title="Delete project">🗑</button>
+          <button onClick={deleteProject} aria-label={confirmDelete ? "Confirm delete project" : "Delete project"} style={confirmDelete ? { background: "var(--accent)", border: "none", color: "#fff", cursor: "pointer", fontSize: 12, fontWeight: 600, borderRadius: 6, padding: "4px 8px" } : { background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 16 }} title="Delete project">{confirmDelete ? "Delete?" : "🗑"}</button>
         </div>
 
         <div className="row" style={{ borderBottom: "1px solid var(--border)", gap: 0 }}>
@@ -868,6 +957,28 @@ export default function EditorShell({ project: initial }: { project: Project }) 
                     ))}
                   </div>
                 )}
+
+                {library.length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+                    <p style={{ fontSize: 12, fontWeight: 600 }}>Your saved AI clips</p>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                      {library.map((l) => (
+                        <div key={l.id} style={{ position: "relative", borderRadius: 6, overflow: "hidden", border: "1px solid var(--border)", background: "var(--bg)" }}>
+                          <video src={`${l.url}#t=0.5`} muted playsInline preload="metadata" style={{ width: "100%", aspectRatio: "9/16", objectFit: "cover", display: "block" }} />
+                          <button onClick={() => removeFromLibrary(l.id)} aria-label="Remove from saved clips" title="Remove from saved clips" style={{ position: "absolute", top: 4, right: 4, background: "rgba(0,0,0,0.65)", border: "none", color: "#fff", borderRadius: 999, width: 20, height: 20, cursor: "pointer", fontSize: 11, lineHeight: 1 }}>✕</button>
+                          <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "linear-gradient(transparent, rgba(0,0,0,0.75))", padding: "14px 6px 6px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 4 }}>
+                            <span style={{ fontSize: 10, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{(l.label || "AI clip").replace(/^AI · /, "")}</span>
+                            <button
+                              onClick={() => addClip({ durationMs: Math.min(l.durationMs, DEFAULT_CLIP_MS), sourceDurationMs: l.durationMs, trimStartMs: 0, source: "fal", pexelsVideoId: 0, pexelsUrl: l.url, pexelsThumbnail: "", pexelsAuthor: l.label || "AI clip", pexelsWidth: 1080, pexelsHeight: 1920 })}
+                              aria-label="Add to timeline"
+                              style={{ background: "var(--accent)", border: "none", color: "#fff", borderRadius: 4, padding: "2px 8px", cursor: "pointer", fontSize: 12 }}
+                            >+</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -903,10 +1014,14 @@ export default function EditorShell({ project: initial }: { project: Project }) 
       </div>
 
       {/* ---------------- main ---------------- */}
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+      <div className="ed-main" style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        <div className="ed-mobilebar">
+          <a href="/" style={{ color: "var(--text)", fontWeight: 600 }}>← Projects</a>
+          <span className="muted" style={{ fontSize: 12 }}>{saveState === "saving" ? "Saving…" : "Saved"}</span>
+        </div>
+        <div className="ed-top" style={{ flex: 1, minHeight: 0, display: "flex" }}>
           {/* preview */}
-          <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, background: "#0b0b0d", position: "relative" }}>
+          <div className="ed-preview" style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, background: "#0b0b0d", position: "relative" }}>
             <span className="muted" style={{ position: "absolute", left: 14, top: 12, fontSize: 12 }}>9:16 · 1080 × 1920</span>
             <div style={{ position: "absolute", right: 14, top: 8, display: "flex", alignItems: "center", gap: 10, zIndex: 5 }}>
               {exportError && <span style={{ fontSize: 11, color: "#ff6b6b", maxWidth: 360 }} title={exportError}>{exportError}</span>}
@@ -977,7 +1092,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
           </div>
 
           {/* inspector */}
-          <aside style={{ width: 260, flexShrink: 0, borderLeft: "1px solid var(--border)", padding: 14, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", background: "var(--panel)" }}>
+          <aside className="ed-aside" style={{ width: 260, flexShrink: 0, borderLeft: "1px solid var(--border)", padding: 14, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", background: "var(--panel)" }}>
             {selectedClip ? (
               <>
                 <div>
@@ -1116,6 +1231,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
             <span style={{ fontVariantNumeric: "tabular-nums", fontSize: 12, color: "#c4c4cc" }}>{fmtTime(timeMs)} / {fmtTime(totalMs)}</span>
             <span className="muted" style={{ fontSize: 11 }}>Space to play</span>
             <button onClick={splitAtPlayhead} title="Cut the clip under the playhead in two (S)" style={{ ...chip, cursor: "pointer", border: "1px solid var(--border)", background: "transparent" }}>Split (S)</button>
+            <button onClick={() => undo()} disabled={!canUndo} title="Undo the last clip change (Ctrl+Z)" style={{ ...chip, cursor: canUndo ? "pointer" : "default", border: "1px solid var(--border)", background: "transparent", opacity: canUndo ? 1 : 0.5 }}>Undo</button>
             <button onClick={duplicateSelected} disabled={!selectedClipId} title="Duplicate the selected clip" style={{ ...chip, cursor: selectedClipId ? "pointer" : "default", border: "1px solid var(--border)", background: "transparent", opacity: selectedClipId ? 1 : 0.5 }}>Duplicate</button>
             <div style={{ flex: 1 }} />
             <span className="muted" style={{ fontSize: 11 }}>Drag onto a + between clips:</span>

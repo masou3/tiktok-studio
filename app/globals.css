@@ -83,3 +83,15 @@ input:focus, textarea:focus {
   font-style: normal;
   font-display: swap;
 }
+
+/* Phone layout for the editor: one column, preview first. */
+.ed-mobilebar { display: none; }
+@media (max-width: 820px) {
+  .ed-root { flex-direction: column !important; height: auto !important; min-height: 100vh; overflow: visible !important; }
+  .ed-main { order: 1; overflow: visible !important; }
+  .ed-left { order: 2; width: 100% !important; min-width: 0 !important; border-right: none !important; border-top: 1px solid var(--border); max-height: 75vh; }
+  .ed-top { flex-direction: column !important; }
+  .ed-preview { min-height: 560px; padding-top: 44px; }
+  .ed-aside { width: 100% !important; border-left: none !important; border-top: 1px solid var(--border); }
+  .ed-mobilebar { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 10; }
+}

@@ -2,7 +2,7 @@
 // Set SUPABASE_URL and SUPABASE_ANON_KEY in .env.local
 // RLS must be disabled (or policies set to allow all) on tiktok_projects and tiktok_clips.
 
-import type { Caption, CaptionStyle, Clip, Project, TransitionType } from "./types";
+import type { Caption, CaptionStyle, Clip, LibraryClip, Project, ProjectCard, TransitionType } from "./types";
 
 const BASE = process.env.SUPABASE_URL!;
 const KEY = process.env.SUPABASE_ANON_KEY!;
@@ -313,4 +313,139 @@ export async function duplicateClip(projectId: string, clipId: string): Promise<
   const clip = project?.clips.find((c) => c.id === clipId);
   if (!clip) return false;
   return !!(await insertAfter(projectId, clipId, cloneFields(clip)));
+}
+
+
+// ---------- home screen cards ----------
+
+/** Light listing for the home screen: skips the voiceover audio and captions, which are large. */
+export async function listProjectCards(): Promise<ProjectCard[]> {
+  const [pr, cr] = await Promise.all([
+    fetch(
+      `${BASE}/rest/v1/tiktok_projects?select=id,title,updated_at,spent_cents,voiceover_script&order=updated_at.desc`,
+      { headers: headers(), cache: "no-store" },
+    ),
+    fetch(
+      `${BASE}/rest/v1/tiktok_clips?select=project_id,order,duration_ms,source,pexels_url,pexels_thumbnail&order=order.asc`,
+      { headers: headers(), cache: "no-store" },
+    ),
+  ]);
+  if (!pr.ok) return [];
+  const projects = (await pr.json()) as any[]; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const clips = cr.ok ? ((await cr.json()) as any[]) : []; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const byProject = new Map<string, any[]>(); // eslint-disable-line @typescript-eslint/no-explicit-any
+  for (const c of clips) {
+    const list = byProject.get(c.project_id) ?? [];
+    list.push(c);
+    byProject.set(c.project_id, list);
+  }
+  return projects.map((p) => {
+    const list = byProject.get(p.id) ?? [];
+    const first = list[0];
+    let thumb: ProjectCard["thumb"] = null;
+    if (first) {
+      if (first.source === "fal") thumb = { kind: "video", url: first.pexels_url };
+      else if (first.source === "image") thumb = { kind: "image", url: first.pexels_url };
+      else if (first.pexels_thumbnail) thumb = { kind: "image", url: first.pexels_thumbnail };
+    }
+    return {
+      id: p.id,
+      title: p.title,
+      updatedAt: p.updated_at,
+      spentCents: p.spent_cents ?? 0,
+      clipCount: list.length,
+      durationMs: list.reduce((a, c) => a + (c.duration_ms ?? 0), 0),
+      hasVoice: !!(p.voiceover_script && String(p.voiceover_script).trim()),
+      thumb,
+    };
+  });
+}
+
+/** Copy a project, its clips, voiceover, captions and music. AI spend starts again at zero. */
+export async function duplicateProject(id: string): Promise<Project | null> {
+  const src = await getProject(id);
+  if (!src) return null;
+  const now = new Date().toISOString();
+  const res = await fetch(`${BASE}/rest/v1/tiktok_projects`, {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({
+      title: `${src.title} (copy)`.slice(0, 120),
+      status: "draft",
+      ai_disclosure: src.aiDisclosure,
+      hashtags: src.hashtags,
+      duration_ms: src.durationMs,
+      voiceover_script: src.voiceoverScript,
+      voiceover_url: src.voiceoverUrl,
+      music_url: src.musicUrl,
+      music_name: src.musicName,
+      music_volume: src.musicVolume,
+      music_fade_ms: src.musicFadeMs,
+      captions: src.captions,
+      caption_style: src.captionStyle,
+      budget_cents: src.budgetCents,
+      spent_cents: 0,
+      created_at: now,
+      updated_at: now,
+    }),
+  });
+  if (!res.ok) return null;
+  const rows = await res.json();
+  const copy = rowToProject(Array.isArray(rows) ? rows[0] : rows);
+  if (src.clips.length) {
+    await fetch(`${BASE}/rest/v1/tiktok_clips`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify(
+        src.clips.map((c, i) => ({
+          project_id: copy.id,
+          order: i,
+          duration_ms: c.durationMs,
+          trim_start_ms: c.trimStartMs,
+          source_duration_ms: c.sourceDurationMs,
+          source: c.source,
+          transition_in: c.transitionIn,
+          transition_ms: c.transitionMs,
+          pexels_video_id: c.pexelsVideoId,
+          pexels_url: c.pexelsUrl,
+          pexels_thumbnail: c.pexelsThumbnail,
+          pexels_author: c.pexelsAuthor,
+          pexels_width: c.pexelsWidth,
+          pexels_height: c.pexelsHeight,
+        })),
+      ),
+    });
+  }
+  return copy;
+}
+
+// ---------- saved AI clips ----------
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function rowToLibrary(r: any): LibraryClip {
+  return { id: r.id, url: r.url, label: r.label ?? "", durationMs: r.duration_ms ?? 5000, createdAt: r.created_at };
+}
+
+export async function listLibrary(): Promise<LibraryClip[]> {
+  const res = await fetch(`${BASE}/rest/v1/tiktok_ai_library?select=*&order=created_at.desc&limit=200`, {
+    headers: headers(),
+    cache: "no-store",
+  });
+  if (!res.ok) return [];
+  return ((await res.json()) as unknown[]).map(rowToLibrary);
+}
+
+/** Remember an AI clip so it can be reused later, even after it's deleted from a project. */
+export async function addToLibrary(url: string, label: string, durationMs: number): Promise<void> {
+  if (!url) return;
+  await fetch(`${BASE}/rest/v1/tiktok_ai_library?on_conflict=url`, {
+    method: "POST",
+    headers: headers({ Prefer: "resolution=ignore-duplicates,return=minimal" }),
+    body: JSON.stringify({ url, label: label.slice(0, 200), duration_ms: Math.round(durationMs) || 5000 }),
+  }).catch(() => null);
+}
+
+export async function removeFromLibrary(id: string): Promise<boolean> {
+  const res = await fetch(`${BASE}/rest/v1/tiktok_ai_library?id=eq.${id}`, { method: "DELETE", headers: headers() });
+  return res.ok;
 }

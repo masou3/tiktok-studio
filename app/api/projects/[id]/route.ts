@@ -4,6 +4,7 @@ import {
   getProject,
   updateProject,
   addClip,
+  addToLibrary,
   removeClip,
   reorderClips,
   trimClip,
@@ -28,6 +29,9 @@ export async function PATCH(req: Request, { params }: Ctx) {
 
   if (body.action === "addClip") {
     const clip = await addClip(id, body.clip);
+    if (body.clip?.source === "fal") {
+      await addToLibrary(body.clip.pexelsUrl, body.clip.pexelsAuthor ?? "", body.clip.sourceDurationMs ?? body.clip.durationMs);
+    }
     return NextResponse.json(clip, { status: 201 });
   }
   if (body.action === "removeClip") {
