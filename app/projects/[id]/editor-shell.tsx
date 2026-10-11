@@ -56,7 +56,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
   const router = useRouter();
 
   const [tab, setTab] = useState<"footage" | "claude">("footage");
-  const [footageSource, setFootageSource] = useState<"pexels" | "fal">("pexels");
+  const [footageSource, setFootageSource] = useState<"pexels" | "fal" | "brand">("pexels");
 
   // Pexels
   const [query, setQuery] = useState("");
@@ -756,13 +756,27 @@ export default function EditorShell({ project: initial }: { project: Project }) 
         {tab === "footage" && (
           <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
             <div style={{ padding: "10px 12px 0", display: "flex", gap: 4 }}>
-              {([["pexels", "Stock · Pexels"], ["fal", "AI clip · fal.ai"]] as const).map(([id, name]) => (
+              {([["pexels", "Stock"], ["fal", "AI clip"], ["brand", "Brand"]] as const).map(([id, name]) => (
                 <button key={id} onClick={() => setFootageSource(id)} style={{ flex: 1, padding: "6px 0", borderRadius: 999, fontSize: 12, cursor: "pointer", border: footageSource === id ? "1px solid var(--text)" : "1px solid var(--border)", background: footageSource === id ? "var(--text)" : "transparent", color: footageSource === id ? "var(--bg)" : "var(--muted)", fontWeight: 600 }}>
                   {name}
                 </button>
               ))}
             </div>
 
+            {footageSource === "brand" && (
+              <div style={{ padding: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, alignContent: "start" }}>
+                {[{ id: "curfew-end", name: "Curfew end card", url: "/brand/curfew-endcard.png" }].map((b) => (
+                  <div key={b.id} style={{ position: "relative", borderRadius: 6, overflow: "hidden", border: "1px solid var(--border)" }}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={b.url} alt={b.name} style={{ width: "100%", aspectRatio: "9/16", objectFit: "cover", display: "block" }} />
+                    <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "linear-gradient(transparent, rgba(0,0,0,0.7))", padding: "12px 6px 6px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontSize: 10, color: "#fff" }}>{b.name}</span>
+                      <button onClick={() => addClip({ durationMs: 3000, sourceDurationMs: 60000, trimStartMs: 0, source: "image", pexelsVideoId: 0, pexelsUrl: b.url, pexelsThumbnail: b.url, pexelsAuthor: "Brand", pexelsWidth: 1080, pexelsHeight: 1920 })} aria-label="Add to timeline" style={{ background: "var(--accent)", border: "none", color: "#fff", borderRadius: 4, padding: "2px 8px", cursor: "pointer", fontSize: 12 }}>+</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
             {footageSource === "pexels" && (
               <>
                 {hoverVideo && (
@@ -896,6 +910,16 @@ export default function EditorShell({ project: initial }: { project: Project }) 
               {placed.map((p, i) => {
                 const st = layerAt(placed, i, timeMs);
                 return (
+                  p.clip.source === "image" ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      key={p.clip.id}
+                      src={p.clip.pexelsUrl}
+                      alt=""
+                      draggable={false}
+                      style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", visibility: st.visible ? "visible" : "hidden", opacity: st.style.opacity, transform: st.style.transform, zIndex: st.style.zIndex }}
+                    />
+                  ) : (
                   // eslint-disable-next-line jsx-a11y/media-has-caption
                   <video
                     key={p.clip.id}
@@ -908,6 +932,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
                     preload="auto"
                     style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", visibility: st.visible ? "visible" : "hidden", opacity: st.style.opacity, transform: st.style.transform, zIndex: st.style.zIndex }}
                   />
+                  )
                 );
               })}
               {!placed.length && (
@@ -945,7 +970,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
               <>
                 <div>
                   <p style={{ fontWeight: 600, fontSize: 13 }}>Clip {selectedClipIdx + 1}</p>
-                  <p className="muted" style={{ fontSize: 11, marginTop: 2 }}>{selectedClip.source === "fal" ? "AI clip · fal.ai" : `Pexels · ${selectedClip.pexelsAuthor}`}</p>
+                  <p className="muted" style={{ fontSize: 11, marginTop: 2 }}>{selectedClip.source === "fal" ? "AI clip · fal.ai" : selectedClip.source === "image" ? "Brand card" : `Pexels · ${selectedClip.pexelsAuthor}`}</p>
                 </div>
                 <div>
                   <p style={label}>Transition in</p>

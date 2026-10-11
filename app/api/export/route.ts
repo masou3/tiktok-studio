@@ -19,6 +19,15 @@ function ffmpegPath() {
 }
 
 async function download(url: string, file: string) {
+  // Files shipped with the app (public/brand/...) are read from disk.
+  if (url.startsWith("/") && !url.startsWith("//")) {
+    const rel = path.normalize(url).replace(/^([/\\])+/, "");
+    if (rel.startsWith("brand" + path.sep) && !rel.includes("..")) {
+      await copyFile(path.join(process.cwd(), "public", rel), file);
+      return;
+    }
+    throw new Error("Unknown local file");
+  }
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Could not download clip (${res.status})`);
   await writeFile(file, Buffer.from(await res.arrayBuffer()));
@@ -51,7 +60,7 @@ export async function POST(req: Request) {
     const urls = [...new Set(project.clips.map((c) => c.pexelsUrl))];
     await Promise.all(
       urls.map(async (u, i) => {
-        const f = path.join(dir, `src${i}.mp4`);
+        const f = path.join(dir, `src${i}${u.startsWith("/") ? path.extname(u) : ".mp4"}`);
         await download(u, f);
         files.set(u, f);
       }),
@@ -89,7 +98,10 @@ export async function POST(req: Request) {
     const { graph, totalMs } = buildFilterGraph(project, hasCaptions, audioIndex, musicIndex);
     await writeFile(path.join(dir, "graph.txt"), graph);
     const args = ["-y", "-hide_banner", "-loglevel", "error"];
-    for (const c of project.clips) args.push("-i", files.get(c.pexelsUrl)!);
+    for (const c of project.clips) {
+      if (c.source === "image") args.push("-loop", "1", "-framerate", "30", "-t", ((c.durationMs + 2000) / 1000).toFixed(3));
+      args.push("-i", files.get(c.pexelsUrl)!);
+    }
     if (audioFile) args.push("-i", audioFile);
     if (musicFile) args.push("-stream_loop", "-1", "-i", musicFile);
     args.push(

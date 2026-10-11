@@ -7,7 +7,8 @@ export const TRANSITIONS: { id: TransitionType; label: string }[] = [
   { id: "zoom", label: "Zoom punch" },
 ];
 
-export type ClipSource = "pexels" | "fal";
+/** "image" is a still (like a brand end card) held for the clip length. */
+export type ClipSource = "pexels" | "fal" | "image";
 
 export type Clip = {
   id: string;
