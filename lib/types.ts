@@ -40,7 +40,7 @@ export type Caption = {
   words: CaptionWord[];
 };
 
-export type CaptionStyle = "bold" | "box" | "karaoke";
+export type CaptionStyle = "tiktok" | "bold" | "box" | "karaoke";
 
 export type ChatMessage = {
   role: "user" | "assistant";

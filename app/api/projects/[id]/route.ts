@@ -73,7 +73,7 @@ export async function PATCH(req: Request, { params }: Ctx) {
     ...(typeof body.musicName === "string" ? { musicName: body.musicName } : {}),
     ...(typeof body.musicVolume === "number" ? { musicVolume: body.musicVolume } : {}),
     ...(Array.isArray(body.captions) ? { captions: body.captions } : {}),
-    ...(["bold", "box", "karaoke"].includes(body.captionStyle) ? { captionStyle: body.captionStyle } : {}),
+    ...(["tiktok", "bold", "box", "karaoke"].includes(body.captionStyle) ? { captionStyle: body.captionStyle } : {}),
   });
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(project);

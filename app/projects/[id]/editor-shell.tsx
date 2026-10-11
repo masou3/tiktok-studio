@@ -3,7 +3,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import type { Project, Clip, ChatMessage, Caption, CaptionStyle, TransitionType, CaptionWord } from "@/lib/types";
 import { TRANSITIONS } from "@/lib/types";
-import { layoutClips, clipsTotalMs, fmtTime, buildCaptions, captionAt, layerAt } from "@/lib/timeline";
+import { layoutClips, clipsTotalMs, fmtTime, buildCaptions, captionAt, layerAt, wordsFromScript } from "@/lib/timeline";
 
 type PexelsVideo = {
   id: number;
@@ -652,6 +652,14 @@ export default function EditorShell({ project: initial }: { project: Project }) 
   }
 
   // ---------- captions ----------
+  async function autoCaption() {
+    const words = wordsFromScript(voiceoverScript, audioMs);
+    if (!words.length) return;
+    const captions = buildCaptions(words);
+    setProject((p) => ({ ...p, captions }));
+    await patch({ captions });
+  }
+
   function editCaption(id: string, text: string) {
     const captions = project.captions.map((c) =>
       c.id === id ? { ...c, text, words: c.words.length === text.split(/\s+/).length ? c.words.map((w, i) => ({ ...w, text: text.split(/\s+/)[i] })) : [] } : c,
@@ -676,6 +684,24 @@ export default function EditorShell({ project: initial }: { project: Project }) 
 
   function renderCaption(c: Caption) {
     const style = project.captionStyle;
+    if (style === "tiktok") {
+      // Phone preview is 252px wide for a 1080px video, so 96px in the export is about 22px here.
+      let active = -1;
+      c.words.forEach((w, i) => {
+        if (timeMs >= w.startMs) active = i;
+      });
+      const base = { fontFamily: "Poppins, Montserrat, 'Arial Black', Arial, sans-serif", fontWeight: 700, fontSize: 22, lineHeight: 1.12, textTransform: "uppercase", letterSpacing: 0.3, WebkitTextStroke: "4px #000", paintOrder: "stroke fill", textShadow: "0 2px 0 rgba(0,0,0,0.9)" } as const;
+      if (!c.words.length) return <span style={{ ...base, color: "#fff" }}>{c.text}</span>;
+      return (
+        <span style={base}>
+          {c.words.map((w, i) => (
+            <span key={i} style={{ display: "inline-block", color: i === active ? "#ffe14d" : "#fff", transform: i === active ? "scale(1.12)" : "scale(1)", transition: "transform 90ms ease-out", marginRight: i < c.words.length - 1 ? "0.28em" : 0 }}>
+              {w.text}
+            </span>
+          ))}
+        </span>
+      );
+    }
     if (style === "karaoke" && c.words.length) {
       return (
         <span style={{ fontWeight: 800, fontSize: 22, lineHeight: 1.15, textShadow: "0 2px 8px rgba(0,0,0,0.75), 0 0 2px #000" }}>
@@ -890,7 +916,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
                 </div>
               )}
               {currentCaption && (
-                <div style={{ position: "absolute", left: 14, right: 14, bottom: "20%", textAlign: "center", zIndex: 100, pointerEvents: "none" }}>
+                <div style={{ position: "absolute", left: 14, right: 14, bottom: "27%", textAlign: "center", zIndex: 100, pointerEvents: "none" }}>
                   {renderCaption(currentCaption)}
                 </div>
               )}
@@ -979,11 +1005,23 @@ export default function EditorShell({ project: initial }: { project: Project }) 
 
             <div>
               <p style={label}>Caption style</p>
-              <div style={{ display: "flex", gap: 4 }}>
-                {(["bold", "box", "karaoke"] as const).map((s) => (
-                  <button key={s} onClick={() => setCaptionStyle(s)} style={{ flex: 1, padding: "6px 0", borderRadius: 6, fontSize: 12, cursor: "pointer", border: "1px solid var(--border)", background: project.captionStyle === s ? "var(--border)" : "transparent", color: "var(--text)", textTransform: "capitalize" }}>{s}</button>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
+                {(["tiktok", "bold", "box", "karaoke"] as const).map((s) => (
+                  <button key={s} onClick={() => setCaptionStyle(s)} style={{ flex: 1, padding: "6px 0", borderRadius: 6, fontSize: 12, cursor: "pointer", border: "1px solid var(--border)", background: project.captionStyle === s ? "var(--border)" : "transparent", color: "var(--text)", textTransform: "capitalize" }}>{s === "tiktok" ? "TikTok" : s}</button>
                 ))}
               </div>
+              {project.captions.length === 0 && (
+                <div style={{ marginTop: 10 }}>
+                  {audioUrl && voiceoverScript.trim() && audioMs > 0 ? (
+                    <>
+                      <button onClick={autoCaption} style={{ width: "100%", padding: "7px 0", borderRadius: 6, fontSize: 12, cursor: "pointer", border: "1px solid var(--accent)", background: "transparent", color: "var(--text)" }}>Add captions to this voiceover</button>
+                      <p className="muted" style={{ fontSize: 11, marginTop: 4 }}>Free and instant, timing is approximate. Regenerating the voiceover (Claude tab) gives exact timing.</p>
+                    </>
+                  ) : (
+                    <p className="muted" style={{ fontSize: 11 }}>No captions yet. In the Claude tab, write a script and press "Generate voiceover + captions".</p>
+                  )}
+                </div>
+              )}
             </div>
 
             <div>
@@ -1146,7 +1184,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
               <div onMouseDown={(e) => e.target === e.currentTarget && seekFromEvent(e)} style={{ height: 44, position: "relative", borderTop: "1px solid var(--border)" }}>
                 {!project.captions.length && (
                   <span className="muted" style={{ position: "absolute", left: 4, top: 14, fontSize: 11, pointerEvents: "none" }}>
-                    {audioUrl ? "Regenerate the voiceover to get timed captions" : "Captions appear when you generate a voiceover (Claude tab)"}
+                    {audioUrl ? "No captions yet: use Add captions in the right panel" : "Captions appear when you generate a voiceover (Claude tab)"}
                   </span>
                 )}
                 {project.captions.map((c) => {

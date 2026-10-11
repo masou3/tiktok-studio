@@ -20,9 +20,12 @@ const clean = (t: string) => t.replace(/[{}\\]/g, "").replace(/\n/g, " ");
 /** Build an ASS subtitle file that matches the three caption styles in the preview. */
 export function buildAss(captions: Caption[], style: CaptionStyle) {
   const box = style === "box";
-  const size = box ? 70 : 84;
+  const tiktok = style === "tiktok";
+  const size = tiktok ? 96 : box ? 70 : 84;
   // Colours are &HAABBGGRR. White text, black outline; box style uses a dark box.
-  const styleLine = box
+  const styleLine = tiktok
+    ? `Style: Cap,Poppins,${size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,1,0,1,10,0,2,70,70,520,1`
+    : box
     ? `Style: Cap,Poppins,${size},&H00FFFFFF,&H00FFFFFF,&HC7000000,&HC7000000,-1,0,0,0,100,100,0,0,3,16,0,2,90,90,400,1`
     : `Style: Cap,Poppins,${size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,7,3,2,90,90,400,1`;
   const lines: string[] = [
@@ -44,7 +47,24 @@ export function buildAss(captions: Caption[], style: CaptionStyle) {
     lines.push(`Dialogue: 0,${assTime(a)},${assTime(b)},Cap,,0,0,0,,${text}`);
 
   for (const c of captions) {
-    if (style === "karaoke" && c.words.length) {
+    if (tiktok && c.words.length) {
+      // One word lit at a time, popping in, like TikTok's own auto-captions.
+      const words = c.words;
+      const up = (t: string) => clean(t).toUpperCase();
+      if (words[0].startMs > c.startMs) ev(c.startMs, words[0].startMs, words.map((x) => up(x.text)).join(" "));
+      words.forEach((w, j) => {
+        const end = j < words.length - 1 ? words[j + 1].startMs : c.endMs;
+        if (end <= w.startMs) return;
+        const text = words
+          .map((x, i) =>
+            i === j
+              ? `{\\c&H4DE1FF&\\fscx86\\fscy86\\t(0,90,\\fscx112\\fscy112)}${up(x.text)}{\\c&HFFFFFF&\\fscx100\\fscy100}`
+              : up(x.text),
+          )
+          .join(" ");
+        ev(w.startMs, end, text);
+      });
+    } else if (style === "karaoke" && c.words.length) {
       const YELLOW = "{\\c&H4DE1FF&}";
       const WHITE = "{\\c&HFFFFFF&}";
       const words = c.words;

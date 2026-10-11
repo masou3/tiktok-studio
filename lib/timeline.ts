@@ -91,3 +91,25 @@ export function layerAt(placed: PlacedClip[], i: number, t: number): LayerState 
   }
   return { visible, localMs, style: { opacity, transform, zIndex: i + 1 } };
 }
+
+/**
+ * Rough word timings for a voiceover we have no timestamps for: spread the
+ * script's words across the audio length, weighting longer words and pauses
+ * after punctuation. Good enough to caption an existing voiceover for free;
+ * regenerating the voiceover gives exact timings.
+ */
+export function wordsFromScript(script: string, audioMs: number): CaptionWord[] {
+  const tokens = script.replace(/<[^>]*>/g, " ").split(/\s+/).filter(Boolean);
+  if (!tokens.length || audioMs <= 0) return [];
+  const weight = (w: string) => w.replace(/[^\p{L}\p{N}]/gu, "").length + 2 + (/[.!?]$/.test(w) ? 5 : /[,;:\u2014-]$/.test(w) ? 2.5 : 0);
+  const lead = Math.min(150, audioMs * 0.02);
+  const span = Math.max(1, audioMs - lead - Math.min(250, audioMs * 0.03));
+  const total = tokens.reduce((a, w) => a + weight(w), 0);
+  let t = lead;
+  return tokens.map((text) => {
+    const len = (weight(text) / total) * span;
+    const w = { text, startMs: Math.round(t), endMs: Math.round(t + len * 0.94) };
+    t += len;
+    return w;
+  });
+}

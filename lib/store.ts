@@ -38,7 +38,7 @@ function rowToProject(row: any): Project {
     musicVolume: row.music_volume ?? 25,
     musicFadeMs: row.music_fade_ms ?? 1500,
     captions: Array.isArray(row.captions) ? row.captions : [],
-    captionStyle: row.caption_style ?? "bold",
+    captionStyle: row.caption_style ?? "tiktok",
     budgetCents: row.budget_cents ?? 500,
     spentCents: row.spent_cents ?? 0,
     createdAt: row.created_at,

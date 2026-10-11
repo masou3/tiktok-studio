@@ -75,3 +75,11 @@ input:focus, textarea:focus {
 .project-card:hover {
   border-color: var(--accent);
 }
+
+@font-face {
+  font-family: "Poppins";
+  src: url("/fonts/Poppins-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
