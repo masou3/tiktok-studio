@@ -51,6 +51,8 @@ export default function EditorShell({ project: initial }: { project: Project }) 
   const [project, setProject] = useState<Project>(initial);
   const [title, setTitle] = useState(initial.title);
   const [saveState, setSaveState] = useState<"saved" | "saving">("saved");
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
   const router = useRouter();
 
   const [tab, setTab] = useState<"footage" | "claude">("footage");
@@ -153,6 +155,36 @@ export default function EditorShell({ project: initial }: { project: Project }) 
   async function saveTitle() {
     if (title === project.title) return;
     await patch({ title });
+  }
+
+  async function exportMp4() {
+    if (exporting) return;
+    setExporting(true);
+    setExportError("");
+    try {
+      const res = await fetch("/api/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId: project.id }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || err.error || `Export failed (${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${(title || "video").replace(/[^\w\- ]+/g, "").trim() || "video"}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (e) {
+      setExportError(String((e as Error).message ?? e).slice(0, 300));
+    } finally {
+      setExporting(false);
+    }
   }
 
   async function deleteProject() {
@@ -738,6 +770,16 @@ export default function EditorShell({ project: initial }: { project: Project }) 
           {/* preview */}
           <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, background: "#0b0b0d", position: "relative" }}>
             <span className="muted" style={{ position: "absolute", left: 14, top: 12, fontSize: 12 }}>9:16 · 1080 × 1920</span>
+            <div style={{ position: "absolute", right: 14, top: 8, display: "flex", alignItems: "center", gap: 10, zIndex: 5 }}>
+              {exportError && <span style={{ fontSize: 11, color: "#ff6b6b", maxWidth: 360 }} title={exportError}>{exportError}</span>}
+              <button
+                onClick={exportMp4}
+                disabled={exporting || project.clips.length === 0}
+                style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 600, cursor: exporting || project.clips.length === 0 ? "default" : "pointer", opacity: exporting || project.clips.length === 0 ? 0.6 : 1 }}
+              >
+                {exporting ? "Rendering… (about a minute)" : "Export MP4"}
+              </button>
+            </div>
             <div onClick={togglePlay} style={{ position: "relative", width: 252, height: 448, background: "#111", borderRadius: 16, overflow: "hidden", boxShadow: "0 0 0 1px var(--border)", cursor: totalMs ? "pointer" : "default" }}>
               {placed.map((p, i) => {
                 const st = layerAt(placed, i, timeMs);
