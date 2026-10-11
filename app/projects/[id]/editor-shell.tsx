@@ -103,6 +103,18 @@ export default function EditorShell({ project: initial }: { project: Project }) 
   const placed = useMemo(() => layoutClips(project.clips), [project.clips]);
   const clipsMs = clipsTotalMs(project.clips);
   const totalMs = Math.max(clipsMs, audioUrl ? audioMs : 0);
+
+  // The audio can finish loading before React attaches onLoadedMetadata (data URLs are fast),
+  // so read the duration directly if it is already known.
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!audioUrl || !el) { setAudioMs(0); return; }
+    const read = () => { if (isFinite(el.duration) && el.duration > 0) setAudioMs(Math.round(el.duration * 1000)); };
+    read();
+    el.addEventListener("loadedmetadata", read);
+    el.addEventListener("durationchange", read);
+    return () => { el.removeEventListener("loadedmetadata", read); el.removeEventListener("durationchange", read); };
+  }, [audioUrl]);
   const pct = (ms: number) => (totalMs > 0 ? (ms / totalMs) * 100 : 0);
 
   // ---------- saving ----------
