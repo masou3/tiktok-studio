@@ -65,6 +65,8 @@ export type Project = {
   musicName: string;
   /** 0 to 100 */
   musicVolume: number;
+  /** Music fade-out length in ms; 0 means no fade. */
+  musicFadeMs: number;
   captions: Caption[];
   captionStyle: CaptionStyle;
   budgetCents: number;

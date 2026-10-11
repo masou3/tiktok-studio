@@ -36,6 +36,7 @@ function rowToProject(row: any): Project {
     musicUrl: row.music_url ?? "",
     musicName: row.music_name ?? "",
     musicVolume: row.music_volume ?? 25,
+    musicFadeMs: row.music_fade_ms ?? 1500,
     captions: Array.isArray(row.captions) ? row.captions : [],
     captionStyle: row.caption_style ?? "bold",
     budgetCents: row.budget_cents ?? 500,
@@ -122,7 +123,7 @@ export async function createProject(title: string): Promise<Project> {
 
 export async function updateProject(
   id: string,
-  patch: Partial<Pick<Project, "title" | "aiDisclosure" | "hashtags" | "durationMs" | "voiceoverScript" | "voiceoverUrl" | "captions" | "captionStyle" | "spentCents" | "musicUrl" | "musicName" | "musicVolume">>,
+  patch: Partial<Pick<Project, "title" | "aiDisclosure" | "hashtags" | "durationMs" | "voiceoverScript" | "voiceoverUrl" | "captions" | "captionStyle" | "spentCents" | "musicUrl" | "musicName" | "musicVolume" | "musicFadeMs">>,
 ): Promise<Project | null> {
   const body: Record<string, unknown> = { updated_at: new Date().toISOString() };
   if (typeof patch.title === "string") body.title = patch.title.trim() || "Untitled video";
@@ -135,6 +136,7 @@ export async function updateProject(
   if (typeof patch.captionStyle === "string") body.caption_style = patch.captionStyle as CaptionStyle;
   if (typeof patch.spentCents === "number") body.spent_cents = patch.spentCents;
   if (typeof patch.musicUrl === "string") body.music_url = patch.musicUrl;
+  if (typeof patch.musicFadeMs === "number") body.music_fade_ms = Math.min(5000, Math.max(0, Math.round(patch.musicFadeMs)));
   if (typeof patch.musicName === "string") body.music_name = patch.musicName;
   if (typeof patch.musicVolume === "number") body.music_volume = Math.min(100, Math.max(0, Math.round(patch.musicVolume)));
 

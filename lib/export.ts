@@ -116,16 +116,18 @@ export function buildFilterGraph(project: Project, hasCaptions: boolean, audioIn
     parts.push(`[${last}]null[vout]`);
   }
   const t = total.toFixed(3);
-  const fadeAt = Math.max(0, total - 1.5).toFixed(3);
+  const fadeS = Math.min(total, Math.max(0, (project.musicFadeMs ?? 1500) / 1000));
+  const fadeAt = Math.max(0, total - fadeS).toFixed(3);
+  const fade = fadeS > 0 ? `,afade=t=out:st=${fadeAt}:d=${fadeS.toFixed(3)}` : "";
   const vol = (Math.min(100, Math.max(0, project.musicVolume ?? 25)) / 100).toFixed(2);
   if (audioInput >= 0 && musicInput >= 0) {
     parts.push(`[${audioInput}:a]aresample=44100,atrim=duration=${t},apad=whole_dur=${t}[vo]`);
-    parts.push(`[${musicInput}:a]aresample=44100,atrim=duration=${t},volume=${vol},afade=t=out:st=${fadeAt}:d=1.5[mu]`);
+    parts.push(`[${musicInput}:a]aresample=44100,atrim=duration=${t},volume=${vol}${fade}[mu]`);
     parts.push(`[vo][mu]amix=inputs=2:duration=first:normalize=0[aout]`);
   } else if (audioInput >= 0) {
     parts.push(`[${audioInput}:a]aresample=44100,atrim=duration=${t},apad=whole_dur=${t}[aout]`);
   } else if (musicInput >= 0) {
-    parts.push(`[${musicInput}:a]aresample=44100,atrim=duration=${t},volume=${vol},afade=t=out:st=${fadeAt}:d=1.5,apad=whole_dur=${t}[aout]`);
+    parts.push(`[${musicInput}:a]aresample=44100,atrim=duration=${t},volume=${vol}${fade},apad=whole_dur=${t}[aout]`);
   } else {
     parts.push(`anullsrc=r=44100:cl=stereo,atrim=duration=${t}[aout]`);
   }

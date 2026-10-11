@@ -327,13 +327,16 @@ export default function EditorShell({ project: initial }: { project: Project }) 
   useEffect(() => {
     const m = musicRef.current;
     if (!m || !project.musicUrl) return;
-    m.volume = Math.min(1, Math.max(0, project.musicVolume / 100));
+    const base = Math.min(1, Math.max(0, project.musicVolume / 100));
+    const fadeMs = project.musicFadeMs;
+    const left = totalMs - timeRef.current;
+    m.volume = fadeMs > 0 && playing ? base * Math.min(1, Math.max(0, left / fadeMs)) : base;
     if (playing) {
       if (m.paused) m.play().catch(() => {});
     } else if (!m.paused) {
       m.pause();
     }
-  }, [playing, project.musicUrl, project.musicVolume]);
+  }, [playing, timeMs, totalMs, project.musicUrl, project.musicVolume, project.musicFadeMs]);
   useEffect(() => {
     const m = musicRef.current;
     if (!m || !project.musicUrl || playing) return;
@@ -992,6 +995,12 @@ export default function EditorShell({ project: initial }: { project: Project }) 
                     <span>Volume</span><span>{project.musicVolume}%</span>
                   </label>
                   <input id="music-vol" type="range" min={0} max={100} step={5} value={project.musicVolume} onChange={(e) => setProject((p) => ({ ...p, musicVolume: Number(e.target.value) }))} onMouseUp={() => patch({ musicVolume: project.musicVolume })} onTouchEnd={() => patch({ musicVolume: project.musicVolume })} onKeyUp={() => patch({ musicVolume: project.musicVolume })} style={{ padding: 0, accentColor: "var(--accent)" }} />
+                  <div className="row" style={{ marginTop: 8, gap: 4 }}>
+                    <span className="muted" style={{ fontSize: 11, marginRight: 2 }}>Fade out</span>
+                    {([0, 1000, 2000, 3000] as const).map((ms) => (
+                      <button key={ms} onClick={() => { setProject((p) => ({ ...p, musicFadeMs: ms })); patch({ musicFadeMs: ms }); }} style={{ flex: 1, padding: "4px 0", borderRadius: 6, fontSize: 11, cursor: "pointer", border: "1px solid var(--border)", background: project.musicFadeMs === ms ? "var(--border)" : "transparent", color: "var(--text)" }}>{ms === 0 ? "Off" : `${ms / 1000}s`}</button>
+                    ))}
+                  </div>
                   <button onClick={() => { setProject((p) => ({ ...p, musicUrl: "", musicName: "" })); patch({ musicUrl: "", musicName: "" }); }} style={{ marginTop: 8, width: "100%", padding: "6px 0", borderRadius: 6, fontSize: 12, cursor: "pointer", border: "1px solid var(--border)", background: "transparent", color: "var(--text)" }}>Remove music</button>
                 </>
               ) : (

@@ -69,6 +69,7 @@ export async function PATCH(req: Request, { params }: Ctx) {
     ...(typeof body.voiceoverScript === "string" ? { voiceoverScript: body.voiceoverScript } : {}),
     ...(typeof body.voiceoverUrl === "string" ? { voiceoverUrl: body.voiceoverUrl } : {}),
     ...(typeof body.musicUrl === "string" ? { musicUrl: body.musicUrl } : {}),
+    ...(typeof body.musicFadeMs === "number" ? { musicFadeMs: body.musicFadeMs } : {}),
     ...(typeof body.musicName === "string" ? { musicName: body.musicName } : {}),
     ...(typeof body.musicVolume === "number" ? { musicVolume: body.musicVolume } : {}),
     ...(Array.isArray(body.captions) ? { captions: body.captions } : {}),
