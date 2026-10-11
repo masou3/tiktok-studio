@@ -5,6 +5,22 @@ import { getProject, updateProject } from "@/lib/store";
 // Price on fal: $0.35 for 5 s, $0.07 per extra second.
 const MODEL = process.env.FAL_VIDEO_MODEL ?? "fal-ai/kling-video/v2.5-turbo/pro/text-to-video";
 
+// Image-to-video keeps the same people and scene: it starts from a frame you supply.
+const I2V_MODEL = process.env.FAL_I2V_MODEL ?? "fal-ai/kling-video/v2.5-turbo/pro/image-to-video";
+
+function safeImage(u: unknown) {
+  if (typeof u !== "string") return null;
+  if (u.startsWith("data:image/jpeg;base64,") || u.startsWith("data:image/png;base64,")) {
+    return u.length < 3_000_000 ? u : null;
+  }
+  try {
+    const url = new URL(u);
+    return url.protocol === "https:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 function costCents(durationS: 5 | 10) {
   return durationS === 10 ? 70 : 35;
 }
@@ -33,6 +49,7 @@ export async function POST(req: Request) {
     projectId?: string;
     prompt?: string;
     duration?: number;
+    imageUrl?: string;
   };
   const prompt = body.prompt?.trim();
   if (!prompt || !body.projectId) {
@@ -47,15 +64,24 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Over budget for this project" }, { status: 402 });
   }
 
-  const res = await fetch(`https://queue.fal.run/${MODEL}`, {
+  const image = body.imageUrl ? safeImage(body.imageUrl) : null;
+  if (body.imageUrl && !image) {
+    return NextResponse.json({ error: "Bad start image" }, { status: 400 });
+  }
+
+  const res = await fetch(`https://queue.fal.run/${image ? I2V_MODEL : MODEL}`, {
     method: "POST",
     headers: falHeaders(),
-    body: JSON.stringify({
-      prompt,
-      duration: String(duration),
-      aspect_ratio: "9:16",
-      negative_prompt: "blur, distort, low quality, text, watermark",
-    }),
+    body: JSON.stringify(
+      image
+        ? { prompt, image_url: image, duration: String(duration), negative_prompt: "blur, distort, low quality, text, watermark" }
+        : {
+            prompt,
+            duration: String(duration),
+            aspect_ratio: "9:16",
+            negative_prompt: "blur, distort, low quality, text, watermark",
+          },
+    ),
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
