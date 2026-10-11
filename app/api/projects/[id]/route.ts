@@ -7,6 +7,7 @@ import {
   removeClip,
   reorderClips,
   trimClip,
+  updateClip,
 } from "@/lib/store";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -42,12 +43,20 @@ export async function PATCH(req: Request, { params }: Ctx) {
     return NextResponse.json(clip);
   }
 
+  if (body.action === "updateClip") {
+    const clip = await updateClip(body.clipId as string, body.fields ?? {});
+    if (!clip) return NextResponse.json({ error: "Update failed" }, { status: 400 });
+    return NextResponse.json(clip);
+  }
+
   const project = await updateProject(id, {
     ...(typeof body.title === "string" ? { title: body.title.trim() || "Untitled video" } : {}),
     ...(typeof body.aiDisclosure === "boolean" ? { aiDisclosure: body.aiDisclosure } : {}),
     ...(Array.isArray(body.hashtags) ? { hashtags: body.hashtags.map(String) } : {}),
     ...(typeof body.voiceoverScript === "string" ? { voiceoverScript: body.voiceoverScript } : {}),
     ...(typeof body.voiceoverUrl === "string" ? { voiceoverUrl: body.voiceoverUrl } : {}),
+    ...(Array.isArray(body.captions) ? { captions: body.captions } : {}),
+    ...(["bold", "box", "karaoke"].includes(body.captionStyle) ? { captionStyle: body.captionStyle } : {}),
   });
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(project);

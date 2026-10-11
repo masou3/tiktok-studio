@@ -2,7 +2,7 @@
 // Set SUPABASE_URL and SUPABASE_ANON_KEY in .env.local
 // RLS must be disabled (or policies set to allow all) on tiktok_projects and tiktok_clips.
 
-import type { Clip, Project } from "./types";
+import type { Caption, CaptionStyle, Clip, Project, TransitionType } from "./types";
 
 const BASE = process.env.SUPABASE_URL!;
 const KEY = process.env.SUPABASE_ANON_KEY!;
@@ -33,6 +33,10 @@ function rowToProject(row: any): Project {
     clips: [],
     voiceoverScript: row.voiceover_script ?? "",
     voiceoverUrl: row.voiceover_url ?? "",
+    captions: Array.isArray(row.captions) ? row.captions : [],
+    captionStyle: row.caption_style ?? "bold",
+    budgetCents: row.budget_cents ?? 500,
+    spentCents: row.spent_cents ?? 0,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -46,6 +50,10 @@ function rowToClip(row: any): Clip {
     order: row.order,
     durationMs: row.duration_ms,
     trimStartMs: row.trim_start_ms ?? 0,
+    sourceDurationMs: row.source_duration_ms ?? row.duration_ms,
+    source: row.source ?? "pexels",
+    transitionIn: row.transition_in ?? "cut",
+    transitionMs: row.transition_ms ?? 400,
     pexelsVideoId: row.pexels_video_id,
     pexelsUrl: row.pexels_url,
     pexelsThumbnail: row.pexels_thumbnail,
@@ -111,7 +119,7 @@ export async function createProject(title: string): Promise<Project> {
 
 export async function updateProject(
   id: string,
-  patch: Partial<Pick<Project, "title" | "aiDisclosure" | "hashtags" | "durationMs" | "voiceoverScript" | "voiceoverUrl">>,
+  patch: Partial<Pick<Project, "title" | "aiDisclosure" | "hashtags" | "durationMs" | "voiceoverScript" | "voiceoverUrl" | "captions" | "captionStyle" | "spentCents">>,
 ): Promise<Project | null> {
   const body: Record<string, unknown> = { updated_at: new Date().toISOString() };
   if (typeof patch.title === "string") body.title = patch.title.trim() || "Untitled video";
@@ -120,6 +128,9 @@ export async function updateProject(
   if (typeof patch.durationMs === "number") body.duration_ms = patch.durationMs;
   if (typeof patch.voiceoverScript === "string") body.voiceover_script = patch.voiceoverScript;
   if (typeof patch.voiceoverUrl === "string") body.voiceover_url = patch.voiceoverUrl;
+  if (Array.isArray(patch.captions)) body.captions = patch.captions as Caption[];
+  if (typeof patch.captionStyle === "string") body.caption_style = patch.captionStyle as CaptionStyle;
+  if (typeof patch.spentCents === "number") body.spent_cents = patch.spentCents;
 
   const res = await fetch(`${BASE}/rest/v1/tiktok_projects?id=eq.${id}`, {
     method: "PATCH",
@@ -141,7 +152,8 @@ export async function deleteProject(id: string): Promise<boolean> {
 
 export async function addClip(
   projectId: string,
-  clip: Omit<Clip, "id" | "projectId" | "order">,
+  clip: Omit<Clip, "id" | "projectId" | "order" | "transitionIn" | "transitionMs"> &
+    Partial<Pick<Clip, "transitionIn" | "transitionMs">>,
 ): Promise<Clip> {
   const ordRes = await fetch(
     `${BASE}/rest/v1/tiktok_clips?project_id=eq.${projectId}&select=order&order=order.desc&limit=1`,
@@ -155,6 +167,10 @@ export async function addClip(
     order: nextOrder,
     duration_ms: clip.durationMs,
     trim_start_ms: clip.trimStartMs ?? 0,
+    source_duration_ms: clip.sourceDurationMs ?? clip.durationMs,
+    source: clip.source ?? "pexels",
+    transition_in: clip.transitionIn ?? "cut",
+    transition_ms: clip.transitionMs ?? 400,
     pexels_video_id: clip.pexelsVideoId,
     pexels_url: clip.pexelsUrl,
     pexels_thumbnail: clip.pexelsThumbnail,
@@ -204,6 +220,28 @@ export async function trimClip(
     method: "PATCH",
     headers: headers(),
     body: JSON.stringify({ trim_start_ms: trimStartMs, duration_ms: durationMs }),
+  });
+  if (!res.ok) return null;
+  const rows = await res.json();
+  return rowToClip(Array.isArray(rows) ? rows[0] : rows);
+}
+
+const TRANSITION_IDS: TransitionType[] = ["cut", "crossfade", "slide", "zoom"];
+
+export async function updateClip(
+  clipId: string,
+  fields: Partial<Pick<Clip, "trimStartMs" | "durationMs" | "transitionIn" | "transitionMs">>,
+): Promise<Clip | null> {
+  const body: Record<string, unknown> = {};
+  if (typeof fields.trimStartMs === "number") body.trim_start_ms = Math.max(0, Math.round(fields.trimStartMs));
+  if (typeof fields.durationMs === "number") body.duration_ms = Math.max(500, Math.round(fields.durationMs));
+  if (fields.transitionIn && TRANSITION_IDS.includes(fields.transitionIn)) body.transition_in = fields.transitionIn;
+  if (typeof fields.transitionMs === "number") body.transition_ms = Math.min(2000, Math.max(100, Math.round(fields.transitionMs)));
+  if (!Object.keys(body).length) return null;
+  const res = await fetch(`${BASE}/rest/v1/tiktok_clips?id=eq.${clipId}`, {
+    method: "PATCH",
+    headers: headers(),
+    body: JSON.stringify(body),
   });
   if (!res.ok) return null;
   const rows = await res.json();

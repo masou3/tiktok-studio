@@ -1,7 +1,9 @@
 "use client";
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import type { Project, Clip, ChatMessage } from "@/lib/types";
+import type { Project, Clip, ChatMessage, Caption, CaptionStyle, TransitionType, CaptionWord } from "@/lib/types";
+import { TRANSITIONS } from "@/lib/types";
+import { layoutClips, clipsTotalMs, fmtTime, buildCaptions, captionAt, layerAt } from "@/lib/timeline";
 
 type PexelsVideo = {
   id: number;
@@ -13,9 +15,36 @@ type PexelsVideo = {
   author: string;
 };
 
-function fmtMs(ms: number) {
-  const s = Math.round(ms / 1000);
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+type FalJob = {
+  id: string;
+  prompt: string;
+  durationMs: number;
+  costCents: number;
+  statusUrl: string;
+  responseUrl: string;
+  status: "IN_QUEUE" | "IN_PROGRESS" | "COMPLETED" | "ADDED" | "ERROR";
+  queuePosition?: number | null;
+  error?: string;
+};
+
+const DEFAULT_CLIP_MS = 5000;
+const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
+const transitionShort: Record<TransitionType, string> = { cut: "+", crossfade: "Fade", slide: "Slide", zoom: "Zoom" };
+
+function loadJobs(projectId: string): FalJob[] {
+  try {
+    const raw = window.localStorage.getItem(`falJobs:${projectId}`);
+    return raw ? (JSON.parse(raw) as FalJob[]) : [];
+  } catch {
+    return [];
+  }
+}
+function saveJobs(projectId: string, jobs: FalJob[]) {
+  try {
+    window.localStorage.setItem(`falJobs:${projectId}`, JSON.stringify(jobs.slice(-20)));
+  } catch {
+    // storage unavailable: jobs just won't survive a reload
+  }
 }
 
 export default function EditorShell({ project: initial }: { project: Project }) {
@@ -25,24 +54,54 @@ export default function EditorShell({ project: initial }: { project: Project }) 
   const router = useRouter();
 
   const [tab, setTab] = useState<"footage" | "claude">("footage");
+  const [footageSource, setFootageSource] = useState<"pexels" | "fal">("pexels");
 
+  // Pexels
   const [query, setQuery] = useState("");
   const [videos, setVideos] = useState<PexelsVideo[]>([]);
   const [searching, setSearching] = useState(false);
   const [hoverVideo, setHoverVideo] = useState<PexelsVideo | null>(null);
   const hoverVideoRef = useRef<HTMLVideoElement>(null);
 
-  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
-  const dragClipId = useRef<string | null>(null);
+  // fal.ai
+  const [falPrompt, setFalPrompt] = useState("");
+  const [falSeconds, setFalSeconds] = useState<5 | 10>(5);
+  const [approval, setApproval] = useState<{ prompt: string; seconds: 5 | 10; costCents: number } | null>(null);
+  const [falJobs, setFalJobs] = useState<FalJob[]>([]);
+  const [falError, setFalError] = useState("");
 
+  // Selection
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [selectedCaptionId, setSelectedCaptionId] = useState<string | null>(null);
+  const [openJoin, setOpenJoin] = useState<string | null>(null);
+  const dragClipId = useRef<string | null>(null);
+  const dragTransition = useRef<TransitionType | null>(null);
+
+  // Claude + voiceover
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [voiceoverScript, setVoiceoverScript] = useState(initial.voiceoverScript ?? "");
   const [audioUrl, setAudioUrl] = useState(initial.voiceoverUrl ?? "");
   const [generatingAudio, setGeneratingAudio] = useState(false);
+  const [voiceError, setVoiceError] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Playback
+  const [playing, setPlaying] = useState(false);
+  const [timeMs, setTimeMs] = useState(0);
+  const timeRef = useRef(0);
+  const [audioMs, setAudioMs] = useState(0);
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const videoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
+  const tracksRef = useRef<HTMLDivElement>(null);
+
+  const placed = useMemo(() => layoutClips(project.clips), [project.clips]);
+  const clipsMs = clipsTotalMs(project.clips);
+  const totalMs = Math.max(clipsMs, audioUrl ? audioMs : 0);
+  const pct = (ms: number) => (totalMs > 0 ? (ms / totalMs) * 100 : 0);
+
+  // ---------- saving ----------
   const patch = useCallback(
     async (body: Record<string, unknown>) => {
       setSaveState("saving");
@@ -52,14 +111,44 @@ export default function EditorShell({ project: initial }: { project: Project }) 
         body: JSON.stringify(body),
       });
       if (res.ok) {
-        const updated = await res.json() as Project;
-        setProject((p) => ({ ...p, ...updated }));
+        const updated = (await res.json()) as Project;
+        // The metadata endpoint doesn't return clips; keep ours.
+        setProject((p) => ({ ...p, ...updated, clips: p.clips }));
       }
       setSaveState("saved");
       return res;
     },
     [project.id],
   );
+
+  const reloadProject = useCallback(async () => {
+    const res = await fetch(`/api/projects/${project.id}`, { cache: "no-store" });
+    if (res.ok) setProject(await res.json());
+  }, [project.id]);
+
+  const pendingClipFields = useRef<Record<string, Partial<Clip>>>({});
+  const clipTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  function changeClip(id: string, fields: Partial<Clip>, delayMs = 500) {
+    setProject((p) => ({ ...p, clips: p.clips.map((c) => (c.id === id ? { ...c, ...fields } : c)) }));
+    pendingClipFields.current[id] = { ...pendingClipFields.current[id], ...fields };
+    clearTimeout(clipTimers.current[id]);
+    setSaveState("saving");
+    clipTimers.current[id] = setTimeout(async () => {
+      const f = pendingClipFields.current[id];
+      delete pendingClipFields.current[id];
+      await fetch(`/api/projects/${project.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "updateClip", clipId: id, fields: f }),
+      });
+      setSaveState("saved");
+    }, delayMs);
+  }
+
+  function setTransition(clipId: string, type: TransitionType) {
+    changeClip(clipId, { transitionIn: type }, 0);
+    setOpenJoin(null);
+  }
 
   async function saveTitle() {
     if (title === project.title) return;
@@ -72,10 +161,106 @@ export default function EditorShell({ project: initial }: { project: Project }) 
     router.push("/");
   }
 
+  // ---------- playback ----------
+  const seek = useCallback(
+    (ms: number) => {
+      const t = Math.max(0, Math.min(totalMs, ms));
+      timeRef.current = t;
+      setTimeMs(t);
+    },
+    [totalMs],
+  );
+
+  const togglePlay = useCallback(() => {
+    if (!totalMs) return;
+    if (!playing && timeRef.current >= totalMs - 50) seek(0);
+    setPlaying((p) => !p);
+  }, [playing, totalMs, seek]);
+
+  useEffect(() => {
+    if (!playing) return;
+    let raf = 0;
+    let last = performance.now();
+    const tick = (now: number) => {
+      const dt = now - last;
+      last = now;
+      let t = timeRef.current + dt;
+      if (t >= totalMs) {
+        t = totalMs;
+        setPlaying(false);
+      }
+      timeRef.current = t;
+      setTimeMs(t);
+      if (t < totalMs) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing, totalMs]);
+
+  // Keep every video layer and the voiceover in step with the playhead.
+  useEffect(() => {
+    placed.forEach((p, i) => {
+      const v = videoRefs.current[p.clip.id];
+      if (!v) return;
+      const st = layerAt(placed, i, timeMs);
+      const want = st.localMs / 1000;
+      if (st.visible) {
+        if (playing) {
+          if (v.paused) v.play().catch(() => {});
+          if (Math.abs(v.currentTime - want) > 0.35) v.currentTime = want;
+        } else {
+          if (!v.paused) v.pause();
+          if (Math.abs(v.currentTime - want) > 0.04) v.currentTime = want;
+        }
+      } else if (!v.paused) {
+        v.pause();
+      }
+    });
+    const a = audioRef.current;
+    if (a && audioUrl) {
+      const want = timeMs / 1000;
+      const inRange = timeMs < audioMs;
+      if (playing && inRange) {
+        if (a.paused) a.play().catch(() => {});
+        if (Math.abs(a.currentTime - want) > 0.3) a.currentTime = want;
+      } else {
+        if (!a.paused) a.pause();
+        if (inRange && Math.abs(a.currentTime - want) > 0.05) a.currentTime = want;
+      }
+    }
+  }, [timeMs, playing, placed, audioUrl, audioMs]);
+
+  useEffect(() => {
+    if (timeRef.current > totalMs) seek(totalMs);
+  }, [totalMs, seek]);
+
+  function seekFromEvent(e: React.MouseEvent) {
+    const el = tracksRef.current;
+    if (!el || !totalMs) return;
+    const r = el.getBoundingClientRect();
+    seek(((e.clientX - r.left) / r.width) * totalMs);
+  }
+
+  // ---------- keyboard ----------
   useEffect(() => {
     async function onKey(e: KeyboardEvent) {
-      if ((e.key === "Delete" || e.key === "Backspace") && selectedClipId) {
-        if (document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "TEXTAREA") return;
+      const tag = document.activeElement?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.key === " ") {
+        e.preventDefault();
+        togglePlay();
+        return;
+      }
+      if (e.key !== "Delete" && e.key !== "Backspace") return;
+      if (selectedCaptionId) {
+        e.preventDefault();
+        const captions = project.captions.filter((c) => c.id !== selectedCaptionId);
+        setSelectedCaptionId(null);
+        setProject((p) => ({ ...p, captions }));
+        await patch({ captions });
+        return;
+      }
+      if (selectedClipId) {
         e.preventDefault();
         setSaveState("saving");
         const res = await fetch(`/api/projects/${project.id}`, {
@@ -84,8 +269,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
           body: JSON.stringify({ action: "removeClip", clipId: selectedClipId }),
         });
         if (res.ok) {
-          const updated = await res.json() as Project;
-          setProject(updated);
+          setProject((await res.json()) as Project);
           setSelectedClipId(null);
         }
         setSaveState("saved");
@@ -93,8 +277,9 @@ export default function EditorShell({ project: initial }: { project: Project }) 
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectedClipId, project.id]);
+  }, [selectedClipId, selectedCaptionId, project.id, project.captions, patch, togglePlay]);
 
+  // ---------- footage: Pexels ----------
   async function searchPexels(e: React.FormEvent) {
     e.preventDefault();
     if (!query.trim()) return;
@@ -107,37 +292,140 @@ export default function EditorShell({ project: initial }: { project: Project }) 
     }
   }
 
-  async function addClipToTimeline(v: PexelsVideo) {
-    setSaveState("saving");
-    const clip: Omit<Clip, "id" | "projectId" | "order"> = {
-      durationMs: v.durationMs,
+  const addClip = useCallback(
+    async (clip: Omit<Clip, "id" | "projectId" | "order" | "transitionIn" | "transitionMs">) => {
+      setSaveState("saving");
+      const res = await fetch(`/api/projects/${project.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "addClip", clip }),
+      });
+      if (res.ok) await reloadProject();
+      setSaveState("saved");
+      return res.ok;
+    },
+    [project.id, reloadProject],
+  );
+
+  function addPexelsClip(v: PexelsVideo) {
+    return addClip({
+      durationMs: Math.min(v.durationMs, DEFAULT_CLIP_MS),
+      sourceDurationMs: v.durationMs,
       trimStartMs: 0,
+      source: "pexels",
       pexelsVideoId: v.id,
       pexelsUrl: v.url,
       pexelsThumbnail: v.thumbnail,
       pexelsAuthor: v.author,
       pexelsWidth: v.width,
       pexelsHeight: v.height,
-    };
-    const res = await fetch(`/api/projects/${project.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "addClip", clip }),
     });
-    if (res.ok) {
-      const projRes = await fetch(`/api/projects/${project.id}`);
-      if (projRes.ok) setProject(await projRes.json());
+  }
+
+  useEffect(() => {
+    if (hoverVideo && hoverVideoRef.current) {
+      hoverVideoRef.current.load();
+      hoverVideoRef.current.play().catch(() => {});
     }
-    setSaveState("saved");
+  }, [hoverVideo]);
+
+  // ---------- footage: fal.ai ----------
+  useEffect(() => {
+    setFalJobs(loadJobs(project.id));
+  }, [project.id]);
+
+  const updateJobs = useCallback(
+    (fn: (jobs: FalJob[]) => FalJob[]) => {
+      setFalJobs((prev) => {
+        const next = fn(prev);
+        saveJobs(project.id, next);
+        return next;
+      });
+    },
+    [project.id],
+  );
+
+  async function approveFal() {
+    if (!approval) return;
+    setFalError("");
+    const res = await fetch("/api/fal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, prompt: approval.prompt, duration: approval.seconds }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setFalError(data.error === "Over budget for this project" ? "That would go over this project's AI budget." : `fal.ai refused the request. ${typeof data.detail === "string" ? data.detail.slice(0, 160) : ""}`);
+      return;
+    }
+    setProject((p) => ({ ...p, spentCents: data.spentCents }));
+    updateJobs((jobs) => [
+      ...jobs,
+      {
+        id: data.requestId,
+        prompt: approval.prompt,
+        durationMs: data.durationMs,
+        costCents: data.costCents,
+        statusUrl: data.statusUrl,
+        responseUrl: data.responseUrl,
+        status: "IN_QUEUE",
+      },
+    ]);
+    setApproval(null);
+    setFalPrompt("");
   }
 
-  function onDragStart(clipId: string) {
+  const activeJobs = falJobs.filter((j) => j.status === "IN_QUEUE" || j.status === "IN_PROGRESS" || j.status === "COMPLETED");
+  useEffect(() => {
+    if (!activeJobs.length) return;
+    let cancelled = false;
+    const poll = async () => {
+      for (const job of activeJobs) {
+        const qs = new URLSearchParams({ statusUrl: job.statusUrl, responseUrl: job.responseUrl });
+        const res = await fetch(`/api/fal?${qs}`, { cache: "no-store" }).catch(() => null);
+        if (!res || cancelled) continue;
+        const data = await res.json().catch(() => ({}));
+        if (data.status === "COMPLETED" && data.videoUrl) {
+          updateJobs((jobs) => jobs.map((j) => (j.id === job.id ? { ...j, status: "ADDED" } : j)));
+          await addClip({
+            durationMs: job.durationMs,
+            sourceDurationMs: job.durationMs,
+            trimStartMs: 0,
+            source: "fal",
+            pexelsVideoId: 0,
+            pexelsUrl: data.videoUrl,
+            pexelsThumbnail: "",
+            pexelsAuthor: `AI · ${job.prompt.slice(0, 60)}`,
+            pexelsWidth: 1080,
+            pexelsHeight: 1920,
+          });
+        } else if (data.status === "ERROR") {
+          updateJobs((jobs) => jobs.map((j) => (j.id === job.id ? { ...j, status: "ERROR", error: String(data.detail ?? "Generation failed").slice(0, 200) } : j)));
+        } else if (data.status) {
+          updateJobs((jobs) => jobs.map((j) => (j.id === job.id ? { ...j, status: data.status, queuePosition: data.queuePosition } : j)));
+        }
+      }
+    };
+    poll();
+    const timer = setInterval(poll, 6000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeJobs.map((j) => `${j.id}:${j.status}`).join(",")]);
+
+  // ---------- timeline drag ----------
+  function onClipDragStart(e: React.DragEvent, clipId: string) {
     dragClipId.current = clipId;
+    dragTransition.current = null;
+    e.dataTransfer.effectAllowed = "move";
   }
 
-  function onDragOver(e: React.DragEvent, targetId: string) {
+  function onClipDragOver(e: React.DragEvent, targetId: string) {
+    if (!dragClipId.current) return;
     e.preventDefault();
-    if (!dragClipId.current || dragClipId.current === targetId) return;
+    if (dragClipId.current === targetId) return;
     const clips = [...project.clips];
     const fromIdx = clips.findIndex((c) => c.id === dragClipId.current);
     const toIdx = clips.findIndex((c) => c.id === targetId);
@@ -147,7 +435,8 @@ export default function EditorShell({ project: initial }: { project: Project }) 
     setProject((p) => ({ ...p, clips }));
   }
 
-  async function onDrop() {
+  async function onClipDrop() {
+    if (!dragClipId.current) return;
     dragClipId.current = null;
     setSaveState("saving");
     await fetch(`/api/projects/${project.id}`, {
@@ -158,53 +447,53 @@ export default function EditorShell({ project: initial }: { project: Project }) 
     setSaveState("saved");
   }
 
+  function onChipDragStart(e: React.DragEvent, t: TransitionType) {
+    dragTransition.current = t;
+    dragClipId.current = null;
+    e.dataTransfer.setData("text/plain", t);
+    e.dataTransfer.effectAllowed = "copy";
+  }
+
+  // ---------- Claude ----------
   async function sendMessage(e: React.FormEvent) {
     e.preventDefault();
     if (!chatInput.trim() || streaming) return;
     const userMsg: ChatMessage = { role: "user", content: chatInput };
     const history = [...messages, userMsg];
-    setMessages(history);
+    setMessages([...history, { role: "assistant", content: "" }]);
     setChatInput("");
     setStreaming(true);
-
-    const assistantMsg: ChatMessage = { role: "assistant", content: "" };
-    setMessages([...history, assistantMsg]);
-
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: history,
-          projectTitle: project.title,
-          clipsCount: project.clips.length,
-        }),
+        body: JSON.stringify({ messages: history, projectTitle: project.title, clipsCount: project.clips.length }),
       });
-
-      if (!res.body) return;
+      if (!res.ok || !res.body) {
+        setMessages([...history, { role: "assistant", content: "Sorry, Claude couldn't answer just now." }]);
+        return;
+      }
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let full = "";
-
+      let buf = "";
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        for (const line of chunk.split("\n")) {
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
-          const data = line.slice(6).trim();
-          if (data === "[DONE]") break;
           try {
-            const json = JSON.parse(data);
-            const delta = json.delta?.text ?? "";
-            full += delta;
+            const json = JSON.parse(line.slice(6));
+            full += json.delta?.text ?? "";
             setMessages([...history, { role: "assistant", content: full }]);
           } catch {
-            // skip non-JSON lines
+            // not JSON
           }
         }
       }
-
       const match = full.match(/<voiceover>([\s\S]*?)<\/voiceover>/);
       if (match) {
         const script = match[1].trim();
@@ -223,55 +512,98 @@ export default function EditorShell({ project: initial }: { project: Project }) 
   async function generateVoiceover() {
     if (!voiceoverScript.trim()) return;
     setGeneratingAudio(true);
+    setVoiceError("");
     try {
       const res = await fetch("/api/elevenlabs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: voiceoverScript }),
       });
-      if (res.ok) {
-        const { audioUrl: url } = await res.json() as { audioUrl: string };
-        setAudioUrl(url);
-        await patch({ voiceoverUrl: url });
+      const data = (await res.json().catch(() => ({}))) as { audioUrl?: string; words?: CaptionWord[] };
+      if (!res.ok || !data.audioUrl) {
+        setVoiceError("ElevenLabs couldn't make the voiceover.");
+        return;
       }
+      const captions = buildCaptions(data.words ?? []);
+      setAudioUrl(data.audioUrl);
+      setProject((p) => ({ ...p, captions }));
+      await patch({ voiceoverUrl: data.audioUrl, voiceoverScript, captions });
     } finally {
       setGeneratingAudio(false);
     }
   }
 
-  useEffect(() => {
-    if (hoverVideo && hoverVideoRef.current) {
-      hoverVideoRef.current.load();
-      hoverVideoRef.current.play().catch(() => {});
-    }
-  }, [hoverVideo]);
+  // ---------- captions ----------
+  function editCaption(id: string, text: string) {
+    const captions = project.captions.map((c) =>
+      c.id === id ? { ...c, text, words: c.words.length === text.split(/\s+/).length ? c.words.map((w, i) => ({ ...w, text: text.split(/\s+/)[i] })) : [] } : c,
+    );
+    setProject((p) => ({ ...p, captions }));
+  }
 
-  const totalMs = project.clips.reduce((sum, c) => sum + c.durationMs, 0);
+  function setCaptionStyle(style: CaptionStyle) {
+    setProject((p) => ({ ...p, captionStyle: style }));
+    patch({ captionStyle: style });
+  }
+
+  // ---------- render helpers ----------
+  const currentCaption = captionAt(project.captions, timeMs);
+  const sceneIdx = placed.findIndex((p) => timeMs >= p.startMs && timeMs < p.endMs);
+  const selectedClip = project.clips.find((c) => c.id === selectedClipId) ?? null;
+  const selectedClipIdx = project.clips.findIndex((c) => c.id === selectedClipId);
+  const selectedCaption = project.captions.find((c) => c.id === selectedCaptionId) ?? null;
+  const budgetLeft = project.budgetCents - project.spentCents;
+  const falCost = falSeconds === 10 ? 70 : 35;
+  const ticks = totalMs > 0 ? [0, 0.2, 0.4, 0.6, 0.8].map((f) => f * totalMs) : [];
+
+  function renderCaption(c: Caption) {
+    const style = project.captionStyle;
+    if (style === "karaoke" && c.words.length) {
+      return (
+        <span style={{ fontWeight: 800, fontSize: 22, lineHeight: 1.15, textShadow: "0 2px 8px rgba(0,0,0,0.75), 0 0 2px #000" }}>
+          {c.words.map((w, i) => (
+            <span key={i} style={{ color: timeMs >= w.startMs ? "#ffe14d" : "#fff" }}>
+              {w.text}{i < c.words.length - 1 ? " " : ""}
+            </span>
+          ))}
+        </span>
+      );
+    }
+    if (style === "box") {
+      return (
+        <span style={{ background: "rgba(0,0,0,0.78)", color: "#fff", fontWeight: 700, fontSize: 18, lineHeight: 1.5, padding: "3px 8px", borderRadius: 6, boxDecorationBreak: "clone", WebkitBoxDecorationBreak: "clone" }}>
+          {c.text}
+        </span>
+      );
+    }
+    return (
+      <span style={{ color: "#fff", fontWeight: 800, fontSize: 22, lineHeight: 1.15, textShadow: "0 2px 8px rgba(0,0,0,0.75), 0 0 2px #000" }}>{c.text}</span>
+    );
+  }
+
+  const label = { fontSize: 11, color: "var(--muted)", marginBottom: 6 } as const;
+  const chip = { background: "var(--border)", borderRadius: 6, padding: "4px 8px", fontSize: 11, cursor: "grab", color: "var(--text)", userSelect: "none" } as const;
 
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden", background: "var(--bg)" }}>
-
+      {/* ---------------- left panel ---------------- */}
       <div style={{ width: 340, minWidth: 280, borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column", background: "var(--panel)" }}>
-
         <div className="row" style={{ padding: "10px 12px", borderBottom: "1px solid var(--border)", gap: 8 }}>
-          <a href="/" style={{ color: "var(--muted)", fontSize: 18, lineHeight: 1 }}>←</a>
+          <a href="/" aria-label="Back to projects" style={{ color: "var(--muted)", fontSize: 18, lineHeight: 1 }}>←</a>
           <input
+            aria-label="Project title"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             onBlur={saveTitle}
-            style={{ flex: 1, fontWeight: 600, background: "transparent", border: "none", borderBottom: "1px solid transparent", borderRadius: 0, padding: "2px 4px", fontSize: 14 }}
-            onFocus={(e) => (e.currentTarget.style.borderBottomColor = "var(--accent)")}
-            onBlurCapture={(e) => (e.currentTarget.style.borderBottomColor = "transparent")}
+            style={{ flex: 1, fontWeight: 600, background: "transparent", border: "none", borderRadius: 0, padding: "2px 4px", fontSize: 14 }}
           />
-          <span className="muted" style={{ fontSize: 11, whiteSpace: "nowrap" }}>
-            {saveState === "saving" ? "Saving…" : "Saved"}
-          </span>
-          <button onClick={deleteProject} style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 16 }} title="Delete project">🗑</button>
+          <span className="muted" style={{ fontSize: 11, whiteSpace: "nowrap" }}>{saveState === "saving" ? "Saving…" : "Saved"}</span>
+          <button onClick={deleteProject} aria-label="Delete project" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 16 }} title="Delete project">🗑</button>
         </div>
 
-        <div className="row" style={{ borderBottom: "1px solid var(--border)" }}>
+        <div className="row" style={{ borderBottom: "1px solid var(--border)", gap: 0 }}>
           {(["footage", "claude"] as const).map((t) => (
-            <button key={t} onClick={() => setTab(t)} style={{ flex: 1, padding: "8px 0", background: "none", border: "none", borderBottom: tab === t ? "2px solid var(--accent)" : "2px solid transparent", color: tab === t ? "var(--fg)" : "var(--muted)", cursor: "pointer", fontSize: 13, fontWeight: tab === t ? 600 : 400 }}>
+            <button key={t} onClick={() => setTab(t)} style={{ flex: 1, padding: "8px 0", background: "none", border: "none", borderBottom: tab === t ? "2px solid var(--accent)" : "2px solid transparent", color: tab === t ? "var(--text)" : "var(--muted)", cursor: "pointer", fontSize: 13, fontWeight: tab === t ? 600 : 400 }}>
               {t === "footage" ? "🎬 Footage" : "🤖 Claude"}
             </button>
           ))}
@@ -279,31 +611,95 @@ export default function EditorShell({ project: initial }: { project: Project }) 
 
         {tab === "footage" && (
           <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-            {hoverVideo && (
-              <div style={{ padding: 8, borderBottom: "1px solid var(--border)", background: "var(--bg)" }}>
-                <video ref={hoverVideoRef} src={hoverVideo.url} muted loop playsInline style={{ width: "100%", borderRadius: 6, maxHeight: 200, objectFit: "cover" }} />
-                <p style={{ fontSize: 11, marginTop: 4 }} className="muted">{fmtMs(hoverVideo.durationMs)} · by {hoverVideo.author}</p>
+            <div style={{ padding: "10px 12px 0", display: "flex", gap: 4 }}>
+              {([["pexels", "Stock · Pexels"], ["fal", "AI clip · fal.ai"]] as const).map(([id, name]) => (
+                <button key={id} onClick={() => setFootageSource(id)} style={{ flex: 1, padding: "6px 0", borderRadius: 999, fontSize: 12, cursor: "pointer", border: footageSource === id ? "1px solid var(--text)" : "1px solid var(--border)", background: footageSource === id ? "var(--text)" : "transparent", color: footageSource === id ? "var(--bg)" : "var(--muted)", fontWeight: 600 }}>
+                  {name}
+                </button>
+              ))}
+            </div>
+
+            {footageSource === "pexels" && (
+              <>
+                {hoverVideo && (
+                  <div style={{ padding: 8, borderBottom: "1px solid var(--border)", background: "var(--bg)", marginTop: 10 }}>
+                    <video ref={hoverVideoRef} src={hoverVideo.url} muted loop playsInline style={{ width: "100%", borderRadius: 6, maxHeight: 200, objectFit: "cover" }} />
+                    <p style={{ fontSize: 11, marginTop: 4 }} className="muted">{fmtTime(hoverVideo.durationMs)} · by {hoverVideo.author}</p>
+                  </div>
+                )}
+                <form onSubmit={searchPexels} style={{ padding: "10px 12px", borderBottom: "1px solid var(--border)", display: "flex", gap: 6 }}>
+                  <input aria-label="Search Pexels" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search portrait stock footage…" style={{ flex: 1, fontSize: 13 }} />
+                  <button className="primary" type="submit" style={{ padding: "6px 12px", fontSize: 13 }} disabled={searching}>{searching ? "…" : "Go"}</button>
+                </form>
+                <div style={{ flex: 1, overflowY: "auto", padding: 8, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, alignContent: "start" }}>
+                  {videos.map((v) => (
+                    <div key={v.id} style={{ position: "relative", borderRadius: 6, overflow: "hidden", border: "1px solid var(--border)" }} onMouseEnter={() => setHoverVideo(v)} onMouseLeave={() => setHoverVideo(null)}>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={v.thumbnail} alt="" style={{ width: "100%", aspectRatio: "9/16", objectFit: "cover", display: "block" }} />
+                      <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "linear-gradient(transparent, rgba(0,0,0,0.7))", padding: "12px 6px 6px", display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
+                        <span style={{ fontSize: 10, color: "#fff" }}>{fmtTime(v.durationMs)}</span>
+                        <button onClick={() => addPexelsClip(v)} aria-label="Add to timeline" style={{ background: "var(--accent)", border: "none", color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 12, cursor: "pointer" }}>+</button>
+                      </div>
+                    </div>
+                  ))}
+                  {!videos.length && !searching && (
+                    <p className="muted" style={{ gridColumn: "1/-1", textAlign: "center", fontSize: 12, padding: 16 }}>Search for portrait footage above. New clips start at 5 seconds; trim them in the inspector.</p>
+                  )}
+                </div>
+              </>
+            )}
+
+            {footageSource === "fal" && (
+              <div style={{ flex: 1, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+                <label style={{ fontSize: 12, fontWeight: 600 }} htmlFor="fal-prompt">Describe the shot</label>
+                <textarea id="fal-prompt" value={falPrompt} onChange={(e) => setFalPrompt(e.target.value)} rows={4} placeholder="Close-up of a sourdough loaf collapsing on a wooden counter, warm morning light, slow push in" style={{ fontSize: 12, resize: "vertical" }} />
+                <div className="row" style={{ gap: 6 }}>
+                  <span style={{ fontSize: 12 }} className="muted">Length</span>
+                  {([5, 10] as const).map((s) => (
+                    <button key={s} onClick={() => setFalSeconds(s)} style={{ padding: "4px 10px", borderRadius: 6, fontSize: 12, cursor: "pointer", border: "1px solid var(--border)", background: falSeconds === s ? "var(--border)" : "transparent", color: "var(--text)" }}>{s}s</button>
+                  ))}
+                  <span style={{ marginLeft: "auto", fontSize: 12 }} className="muted">{money(falCost)}</span>
+                </div>
+                <p className="muted" style={{ fontSize: 11 }}>Kling 2.5 Turbo via fal.ai, 9:16. Takes about 1 to 3 minutes. Budget left for this project: {money(budgetLeft)}.</p>
+                <button className="primary" style={{ fontSize: 13, padding: "8px 0" }} disabled={!falPrompt.trim() || !!approval} onClick={() => setApproval({ prompt: falPrompt.trim(), seconds: falSeconds, costCents: falCost })}>
+                  Generate AI clip
+                </button>
+
+                {approval && (
+                  <div style={{ border: "1px solid #e0a040", borderRadius: 8, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8, background: "#1f1a12" }}>
+                    <div style={{ fontSize: 12, color: "#e0a040", fontWeight: 600 }}>Approval needed: fal.ai clip</div>
+                    <div style={{ fontSize: 12, color: "#c4c4cc" }}>
+                      About {approval.seconds} seconds at 1080p. Cost {money(approval.costCents)}. Budget left {money(budgetLeft)}.
+                    </div>
+                    {approval.costCents > budgetLeft && <div style={{ fontSize: 12, color: "#ff8a8a" }}>Not enough budget left for this clip.</div>}
+                    <div className="row">
+                      <button onClick={approveFal} disabled={approval.costCents > budgetLeft} style={{ background: "#e8e8ea", border: 0, color: "#121214", borderRadius: 6, padding: "6px 12px", fontWeight: 600, cursor: "pointer" }}>Approve</button>
+                      <button onClick={() => setApproval(null)} style={{ background: "none", border: "1px solid #3a3a40", color: "#e8e8ea", borderRadius: 6, padding: "6px 12px", cursor: "pointer" }}>Skip</button>
+                    </div>
+                  </div>
+                )}
+                {falError && <p style={{ fontSize: 12, color: "#ff8a8a" }}>{falError}</p>}
+
+                {falJobs.length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
+                    <p style={{ fontSize: 12, fontWeight: 600 }}>AI clips</p>
+                    {[...falJobs].reverse().map((j) => (
+                      <div key={j.id} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "8px 10px", fontSize: 12, display: "flex", flexDirection: "column", gap: 4 }}>
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{j.prompt}</span>
+                        <span className="muted" style={{ fontSize: 11 }}>
+                          {j.status === "IN_QUEUE" && `Queued${j.queuePosition != null ? ` (#${j.queuePosition})` : ""}…`}
+                          {j.status === "IN_PROGRESS" && "Generating…"}
+                          {j.status === "COMPLETED" && "Adding to timeline…"}
+                          {j.status === "ADDED" && "Added to timeline"}
+                          {j.status === "ERROR" && `Failed: ${j.error ?? ""}`}
+                          {" · "}{money(j.costCents)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
-            <form onSubmit={searchPexels} style={{ padding: "10px 12px", borderBottom: "1px solid var(--border)", display: "flex", gap: 6 }}>
-              <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search Pexels footage…" style={{ flex: 1, fontSize: 13 }} />
-              <button className="primary" type="submit" style={{ padding: "6px 12px", fontSize: 13 }} disabled={searching}>{searching ? "…" : "Go"}</button>
-            </form>
-            <div style={{ flex: 1, overflowY: "auto", padding: 8, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, alignContent: "start" }}>
-              {videos.map((v) => (
-                <div key={v.id} style={{ position: "relative", borderRadius: 6, overflow: "hidden", cursor: "pointer", border: "1px solid var(--border)" }} onMouseEnter={() => setHoverVideo(v)} onMouseLeave={() => setHoverVideo(null)}>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={v.thumbnail} alt="" style={{ width: "100%", aspectRatio: "9/16", objectFit: "cover", display: "block" }} />
-                  <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "linear-gradient(transparent, rgba(0,0,0,0.7))", padding: "12px 6px 6px", display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
-                    <span style={{ fontSize: 10, color: "#fff" }}>{fmtMs(v.durationMs)}</span>
-                    <button onClick={() => addClipToTimeline(v)} style={{ background: "var(--accent)", border: "none", color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 12, cursor: "pointer" }}>+</button>
-                  </div>
-                </div>
-              ))}
-              {!videos.length && !searching && (
-                <p className="muted" style={{ gridColumn: "1/-1", textAlign: "center", fontSize: 12, padding: 16 }}>Search for portrait footage above.</p>
-              )}
-            </div>
           </div>
         )}
 
@@ -311,103 +707,309 @@ export default function EditorShell({ project: initial }: { project: Project }) 
           <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
             <div style={{ flex: 1, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
               {messages.length === 0 && (
-                <p className="muted" style={{ fontSize: 12, textAlign: "center", marginTop: 20 }}>Ask Claude to help plan your video, write a script, or suggest footage searches.</p>
+                <p className="muted" style={{ fontSize: 12, textAlign: "center", marginTop: 20 }}>Ask Claude to plan your video, write a voiceover script, or suggest footage searches.</p>
               )}
               {messages.map((m, i) => (
-                <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", background: m.role === "user" ? "var(--accent)" : "var(--panel)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 12px", maxWidth: "90%", fontSize: 13, color: m.role === "user" ? "#fff" : "var(--fg)", whiteSpace: "pre-wrap" }}>
-                  {m.content}
+                <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", background: m.role === "user" ? "var(--accent)" : "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 12px", maxWidth: "90%", fontSize: 13, color: m.role === "user" ? "#fff" : "var(--text)", whiteSpace: "pre-wrap" }}>
+                  {m.content.replace(/<\/?voiceover>/g, "").trim() || (streaming && i === messages.length - 1 ? "…" : "")}
                 </div>
               ))}
               <div ref={messagesEndRef} />
             </div>
             <div style={{ padding: "10px 12px", borderTop: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 8 }}>
-              <p style={{ fontSize: 12, fontWeight: 600, margin: 0 }}>Voiceover script</p>
-              <textarea value={voiceoverScript} onChange={(e) => setVoiceoverScript(e.target.value)} onBlur={() => patch({ voiceoverScript })} placeholder="Claude will fill this from <voiceover> tags, or type your own…" rows={4} style={{ fontSize: 12, resize: "vertical" }} />
+              <label htmlFor="vo-script" style={{ fontSize: 12, fontWeight: 600 }}>Voiceover script</label>
+              <textarea id="vo-script" value={voiceoverScript} onChange={(e) => setVoiceoverScript(e.target.value)} onBlur={() => patch({ voiceoverScript })} placeholder="Claude fills this when it writes a script, or type your own…" rows={4} style={{ fontSize: 12, resize: "vertical" }} />
               <button className="primary" onClick={generateVoiceover} disabled={!voiceoverScript.trim() || generatingAudio} style={{ fontSize: 12, padding: "6px 0" }}>
-                {generatingAudio ? "Generating…" : "🎙 Generate voiceover"}
+                {generatingAudio ? "Generating…" : audioUrl ? "🎙 Regenerate voiceover + captions" : "🎙 Generate voiceover + captions"}
               </button>
-              {audioUrl && (
-                // eslint-disable-next-line jsx-a11y/media-has-caption
-                <audio controls src={audioUrl} style={{ width: "100%", height: 32 }} />
-              )}
+              {voiceError && <p style={{ fontSize: 12, color: "#ff8a8a" }}>{voiceError}</p>}
             </div>
             <form onSubmit={sendMessage} style={{ padding: "8px 12px", borderTop: "1px solid var(--border)", display: "flex", gap: 6 }}>
-              <input value={chatInput} onChange={(e) => setChatInput(e.target.value)} placeholder="Message Claude…" disabled={streaming} style={{ flex: 1, fontSize: 13 }} />
-              <button className="primary" type="submit" disabled={streaming || !chatInput.trim()} style={{ padding: "6px 12px", fontSize: 13 }}>{streaming ? "…" : "↑"}</button>
+              <input aria-label="Message Claude" value={chatInput} onChange={(e) => setChatInput(e.target.value)} placeholder="Message Claude…" disabled={streaming} style={{ flex: 1, fontSize: 13 }} />
+              <button className="primary" type="submit" aria-label="Send" disabled={streaming || !chatInput.trim()} style={{ padding: "6px 12px", fontSize: 13 }}>{streaming ? "…" : "↑"}</button>
             </form>
           </div>
         )}
       </div>
 
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, gap: 24, overflow: "hidden" }}>
-          <div style={{ width: 270, height: 480, background: "#111", borderRadius: 24, border: "2px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
-            {project.clips[0] ? (
+      {/* ---------------- main ---------------- */}
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+          {/* preview */}
+          <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, background: "#0b0b0d", position: "relative" }}>
+            <span className="muted" style={{ position: "absolute", left: 14, top: 12, fontSize: 12 }}>9:16 · 1080 × 1920</span>
+            <div onClick={togglePlay} style={{ position: "relative", width: 252, height: 448, background: "#111", borderRadius: 16, overflow: "hidden", boxShadow: "0 0 0 1px var(--border)", cursor: totalMs ? "pointer" : "default" }}>
+              {placed.map((p, i) => {
+                const st = layerAt(placed, i, timeMs);
+                return (
+                  // eslint-disable-next-line jsx-a11y/media-has-caption
+                  <video
+                    key={p.clip.id}
+                    ref={(el) => {
+                      videoRefs.current[p.clip.id] = el;
+                    }}
+                    src={p.clip.pexelsUrl}
+                    muted
+                    playsInline
+                    preload="auto"
+                    style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", visibility: st.visible ? "visible" : "hidden", opacity: st.style.opacity, transform: st.style.transform, zIndex: st.style.zIndex }}
+                  />
+                );
+              })}
+              {!placed.length && (
+                <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <span className="muted" style={{ fontSize: 13 }}>No clips yet</span>
+                </div>
+              )}
+              {currentCaption && (
+                <div style={{ position: "absolute", left: 14, right: 14, bottom: "20%", textAlign: "center", zIndex: 100, pointerEvents: "none" }}>
+                  {renderCaption(currentCaption)}
+                </div>
+              )}
+              {!playing && totalMs > 0 && (
+                <div style={{ position: "absolute", inset: 0, zIndex: 101, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
+                  <div style={{ width: 52, height: 52, borderRadius: "50%", background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 20 }}>▶</div>
+                </div>
+              )}
+            </div>
+            <span className="muted" style={{ fontSize: 11 }}>
+              {placed.length ? `Scene ${Math.max(1, sceneIdx + 1)} of ${placed.length} · ` : ""}{fmtTime(timeMs)}
+            </span>
+            {audioUrl && (
               // eslint-disable-next-line jsx-a11y/media-has-caption
-              <video key={project.clips[0].id} src={project.clips[0].pexelsUrl} muted autoPlay loop playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-            ) : (
-              <span className="muted" style={{ fontSize: 13 }}>No clips yet</span>
+              <audio ref={audioRef} src={audioUrl} preload="auto" onLoadedMetadata={(e) => setAudioMs(Math.round(e.currentTarget.duration * 1000))} style={{ display: "none" }} />
             )}
           </div>
-          <div className="card" style={{ width: 200, alignSelf: "flex-start" }}>
-            <p style={{ fontWeight: 600, marginBottom: 10, fontSize: 13 }}>Inspector</p>
-            {selectedClipId ? (
-              (() => {
-                const clip = project.clips.find((c) => c.id === selectedClipId);
-                return clip ? (
-                  <>
-                    <p style={{ fontSize: 12, marginBottom: 4 }}>Duration</p>
-                    <p className="muted" style={{ fontSize: 11, marginBottom: 8 }}>{fmtMs(clip.durationMs)}</p>
-                    <p style={{ fontSize: 12, marginBottom: 4 }}>Source</p>
-                    <p className="muted" style={{ fontSize: 11, marginBottom: 8 }}>Pexels · {clip.pexelsAuthor}</p>
-                    <p style={{ fontSize: 12, marginBottom: 4 }}>Size</p>
-                    <p className="muted" style={{ fontSize: 11 }}>{clip.pexelsWidth} × {clip.pexelsHeight}</p>
-                    <hr style={{ borderColor: "var(--border)", margin: "10px 0" }} />
-                    <p className="muted" style={{ fontSize: 11 }}>Press Delete to remove</p>
-                  </>
-                ) : null;
-              })()
+
+          {/* inspector */}
+          <aside style={{ width: 260, flexShrink: 0, borderLeft: "1px solid var(--border)", padding: 14, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", background: "var(--panel)" }}>
+            {selectedClip ? (
+              <>
+                <div>
+                  <p style={{ fontWeight: 600, fontSize: 13 }}>Clip {selectedClipIdx + 1}</p>
+                  <p className="muted" style={{ fontSize: 11, marginTop: 2 }}>{selectedClip.source === "fal" ? "AI clip · fal.ai" : `Pexels · ${selectedClip.pexelsAuthor}`}</p>
+                </div>
+                <div>
+                  <p style={label}>Transition in</p>
+                  {selectedClipIdx === 0 ? (
+                    <p className="muted" style={{ fontSize: 12 }}>First clip: the video starts here.</p>
+                  ) : (
+                    <>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
+                        {TRANSITIONS.map((t) => (
+                          <button key={t.id} onClick={() => setTransition(selectedClip.id, t.id)} style={{ padding: "6px 0", borderRadius: 6, fontSize: 12, cursor: "pointer", border: "1px solid var(--border)", background: selectedClip.transitionIn === t.id ? "var(--border)" : "transparent", color: "var(--text)" }}>{t.label}</button>
+                        ))}
+                      </div>
+                      {selectedClip.transitionIn !== "cut" && (
+                        <div className="row" style={{ marginTop: 8, gap: 4 }}>
+                          <span className="muted" style={{ fontSize: 11 }}>Length</span>
+                          {[300, 500, 800].map((ms) => (
+                            <button key={ms} onClick={() => changeClip(selectedClip.id, { transitionMs: ms }, 0)} style={{ flex: 1, padding: "4px 0", borderRadius: 6, fontSize: 11, cursor: "pointer", border: "1px solid var(--border)", background: selectedClip.transitionMs === ms ? "var(--border)" : "transparent", color: "var(--text)" }}>{ms / 1000}s</button>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+                <div>
+                  <label style={{ ...label, display: "flex", justifyContent: "space-between" }} htmlFor="clip-len">
+                    <span>Length</span><span>{(selectedClip.durationMs / 1000).toFixed(1)}s</span>
+                  </label>
+                  <input id="clip-len" type="range" min={1000} max={Math.max(1000, selectedClip.sourceDurationMs - selectedClip.trimStartMs)} step={100} value={selectedClip.durationMs} onChange={(e) => changeClip(selectedClip.id, { durationMs: Number(e.target.value) })} style={{ padding: 0, accentColor: "var(--accent)" }} />
+                </div>
+                <div>
+                  <label style={{ ...label, display: "flex", justifyContent: "space-between" }} htmlFor="clip-start">
+                    <span>Starts at (in source)</span><span>{(selectedClip.trimStartMs / 1000).toFixed(1)}s</span>
+                  </label>
+                  <input id="clip-start" type="range" min={0} max={Math.max(0, selectedClip.sourceDurationMs - selectedClip.durationMs)} step={100} value={selectedClip.trimStartMs} disabled={selectedClip.sourceDurationMs <= selectedClip.durationMs} onChange={(e) => changeClip(selectedClip.id, { trimStartMs: Number(e.target.value) })} style={{ padding: 0, accentColor: "var(--accent)" }} />
+                  <p className="muted" style={{ fontSize: 11, marginTop: 4 }}>Source is {(selectedClip.sourceDurationMs / 1000).toFixed(1)}s long.</p>
+                </div>
+                <p className="muted" style={{ fontSize: 11 }}>Drag clips to reorder. Press Delete to remove.</p>
+              </>
+            ) : selectedCaption ? (
+              <>
+                <p style={{ fontWeight: 600, fontSize: 13 }}>Caption</p>
+                <div>
+                  <label style={label} htmlFor="cap-text">Text</label>
+                  <textarea id="cap-text" value={selectedCaption.text} rows={3} onChange={(e) => editCaption(selectedCaption.id, e.target.value)} onBlur={() => patch({ captions: project.captions })} style={{ fontSize: 13, resize: "vertical" }} />
+                  <p className="muted" style={{ fontSize: 11, marginTop: 4 }}>{fmtTime(selectedCaption.startMs)} to {fmtTime(selectedCaption.endMs)} · press Delete to remove</p>
+                </div>
+              </>
             ) : (
               <>
-                <p className="muted" style={{ fontSize: 12 }}>Select a clip to inspect it.</p>
-                <hr style={{ borderColor: "var(--border)", margin: "10px 0" }} />
-                <p style={{ fontSize: 12 }}>Project</p>
-                <p className="muted" style={{ fontSize: 11 }}>1080 × 1920 · 30 fps</p>
-                <p className="muted" style={{ fontSize: 11 }}>{fmtMs(totalMs)} total</p>
+                <div>
+                  <p style={{ fontWeight: 600, fontSize: 13 }}>Project</p>
+                  <p className="muted" style={{ fontSize: 11, marginTop: 2 }}>1080 × 1920 · 30 fps · {fmtTime(totalMs)}</p>
+                  <p className="muted" style={{ fontSize: 11, marginTop: 6 }}>Select a clip or caption on the timeline to edit it.</p>
+                </div>
               </>
             )}
-          </div>
-        </div>
 
-        <div style={{ minHeight: 180, maxHeight: 240, borderTop: "1px solid var(--border)", background: "var(--panel)", padding: 12, display: "flex", flexDirection: "column" }}>
-          <div className="row" style={{ marginBottom: 10, justifyContent: "space-between" }}>
-            <span style={{ fontWeight: 600, fontSize: 13 }}>Timeline · {project.clips.length} clip{project.clips.length !== 1 ? "s" : ""} · {fmtMs(totalMs)}</span>
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1 }}>
-            <div className="row" style={{ gap: 6, alignItems: "flex-start" }}>
-              <span className="muted" style={{ width: 68, fontSize: 11, textAlign: "right", paddingTop: 6, flexShrink: 0 }}>Video</span>
-              <div style={{ flex: 1, minHeight: 48, background: "var(--bg)", borderRadius: 4, border: "1px dashed var(--border)", display: "flex", gap: 4, padding: 4, overflowX: "auto", alignItems: "center" }}>
-                {project.clips.length === 0 && <span className="muted" style={{ fontSize: 11, padding: "0 8px" }}>Add clips from the Footage tab</span>}
-                {project.clips.map((clip) => (
-                  <div key={clip.id} draggable onDragStart={() => onDragStart(clip.id)} onDragOver={(e) => onDragOver(e, clip.id)} onDrop={onDrop} onClick={() => setSelectedClipId(clip.id === selectedClipId ? null : clip.id)} style={{ width: Math.max(48, (clip.durationMs / 1000) * 8), height: 40, borderRadius: 4, overflow: "hidden", flexShrink: 0, cursor: "grab", border: clip.id === selectedClipId ? "2px solid var(--accent)" : "2px solid transparent", position: "relative" }}>
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={clip.pexelsThumbnail} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                    <span style={{ position: "absolute", bottom: 1, left: 2, fontSize: 9, color: "#fff", textShadow: "0 0 3px rgba(0,0,0,0.8)" }}>{fmtMs(clip.durationMs)}</span>
-                  </div>
+            <div>
+              <p style={label}>Caption style</p>
+              <div style={{ display: "flex", gap: 4 }}>
+                {(["bold", "box", "karaoke"] as const).map((s) => (
+                  <button key={s} onClick={() => setCaptionStyle(s)} style={{ flex: 1, padding: "6px 0", borderRadius: 6, fontSize: 12, cursor: "pointer", border: "1px solid var(--border)", background: project.captionStyle === s ? "var(--border)" : "transparent", color: "var(--text)", textTransform: "capitalize" }}>{s}</button>
                 ))}
               </div>
             </div>
-            <div className="row" style={{ gap: 6 }}>
-              <span className="muted" style={{ width: 68, fontSize: 11, textAlign: "right", paddingTop: 6, flexShrink: 0 }}>Voiceover</span>
-              <div style={{ flex: 1, height: 28, background: "var(--bg)", borderRadius: 4, border: "1px dashed var(--border)", display: "flex", alignItems: "center", padding: "0 8px" }}>
-                {audioUrl ? <span style={{ fontSize: 11, color: "var(--accent)" }}>🎙 Voiceover ready</span> : <span className="muted" style={{ fontSize: 11 }}>No voiceover yet</span>}
+
+            <div style={{ marginTop: "auto", border: "1px solid var(--border)", borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+              <p style={{ fontSize: 11 }} className="muted">AI clip budget</p>
+              <div style={{ height: 6, background: "var(--border)", borderRadius: 999, overflow: "hidden" }}>
+                <div style={{ width: `${Math.min(100, (project.spentCents / Math.max(1, project.budgetCents)) * 100)}%`, height: "100%", background: "var(--accent)" }} />
               </div>
+              <p style={{ fontSize: 12 }}>{money(project.spentCents)} used of {money(project.budgetCents)}</p>
             </div>
-            <div className="row" style={{ gap: 6 }}>
-              <span className="muted" style={{ width: 68, fontSize: 11, textAlign: "right", paddingTop: 6, flexShrink: 0 }}>Captions</span>
-              <div style={{ flex: 1, height: 28, background: "var(--bg)", borderRadius: 4, border: "1px dashed var(--border)", display: "flex", alignItems: "center", padding: "0 8px" }}>
-                <span className="muted" style={{ fontSize: 11 }}>Coming soon</span>
+          </aside>
+        </div>
+
+        {/* ---------------- timeline ---------------- */}
+        <div style={{ height: 250, flexShrink: 0, borderTop: "1px solid var(--border)", background: "var(--panel)", display: "flex", flexDirection: "column" }}>
+          <div className="row" style={{ height: 42, flexShrink: 0, padding: "0 12px", borderBottom: "1px solid var(--border)", gap: 10 }}>
+            <button onClick={togglePlay} disabled={!totalMs} aria-label={playing ? "Pause" : "Play"} style={{ background: "#e8e8ea", border: 0, color: "#121214", borderRadius: 6, padding: "5px 14px", fontWeight: 600, cursor: totalMs ? "pointer" : "default", opacity: totalMs ? 1 : 0.5 }}>
+              {playing ? "Pause" : "Play"}
+            </button>
+            <span style={{ fontVariantNumeric: "tabular-nums", fontSize: 12, color: "#c4c4cc" }}>{fmtTime(timeMs)} / {fmtTime(totalMs)}</span>
+            <span className="muted" style={{ fontSize: 11 }}>Space to play</span>
+            <div style={{ flex: 1 }} />
+            <span className="muted" style={{ fontSize: 11 }}>Drag onto a + between clips:</span>
+            {TRANSITIONS.filter((t) => t.id !== "cut").map((t) => (
+              <div key={t.id} draggable onDragStart={(e) => onChipDragStart(e, t.id)} onDragEnd={() => (dragTransition.current = null)} style={chip}>{t.label}</div>
+            ))}
+          </div>
+
+          <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+            <div style={{ width: 84, flexShrink: 0, borderRight: "1px solid var(--border)", fontSize: 11, color: "#c4c4cc" }}>
+              <div style={{ height: 24 }} />
+              <div style={{ height: 64, display: "flex", alignItems: "center", padding: "0 10px", borderTop: "1px solid var(--border)" }}>Video</div>
+              <div style={{ height: 44, display: "flex", alignItems: "center", padding: "0 10px", borderTop: "1px solid var(--border)" }}>Captions</div>
+              <div style={{ height: 44, display: "flex", alignItems: "center", padding: "0 10px", borderTop: "1px solid var(--border)" }}>Voice</div>
+            </div>
+
+            <div ref={tracksRef} style={{ flex: 1, minWidth: 0, position: "relative", margin: "0 14px" }}>
+              {/* ruler */}
+              <div onMouseDown={seekFromEvent} style={{ height: 24, position: "relative", cursor: "pointer", fontSize: 10, color: "var(--muted)" }}>
+                {ticks.map((t) => (
+                  <span key={t} style={{ position: "absolute", left: `${pct(t)}%`, top: 6, borderLeft: "1px solid var(--border)", paddingLeft: 3 }}>{fmtTime(t)}</span>
+                ))}
               </div>
+
+              {/* video lane */}
+              <div onMouseDown={(e) => { if (e.target !== e.currentTarget) return; seekFromEvent(e); setSelectedClipId(null); setSelectedCaptionId(null); setOpenJoin(null); }} style={{ height: 64, position: "relative", borderTop: "1px solid var(--border)" }}>
+                {!placed.length && <span className="muted" style={{ position: "absolute", left: 4, top: 22, fontSize: 11 }}>Add clips from the Footage tab</span>}
+                {placed.map((p) => {
+                  const sel = p.clip.id === selectedClipId;
+                  return (
+                    <div
+                      key={p.clip.id}
+                      draggable
+                      onDragStart={(e) => onClipDragStart(e, p.clip.id)}
+                      onDragOver={(e) => onClipDragOver(e, p.clip.id)}
+                      onDrop={onClipDrop}
+                      onClick={() => {
+                        setSelectedCaptionId(null);
+                        setSelectedClipId(sel ? null : p.clip.id);
+                      }}
+                      title={p.clip.source === "fal" ? "AI clip" : `Pexels · ${p.clip.pexelsAuthor}`}
+                      style={{ position: "absolute", left: `${pct(p.startMs)}%`, width: `calc(${pct(p.endMs - p.startMs)}% - 2px)`, top: 6, bottom: 6, borderRadius: 6, overflow: "hidden", cursor: "grab", boxShadow: sel ? "0 0 0 2px var(--accent)" : "0 0 0 1px var(--border)", background: p.clip.source === "fal" ? "#4a3324" : "#2f4a3a" }}
+                    >
+                      {p.clip.pexelsThumbnail ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={p.clip.pexelsThumbnail} alt="" draggable={false} style={{ width: "100%", height: "100%", objectFit: "cover", opacity: 0.85 }} />
+                      ) : (
+                        // eslint-disable-next-line jsx-a11y/media-has-caption
+                        <video src={p.clip.pexelsUrl} muted preload="metadata" style={{ width: "100%", height: "100%", objectFit: "cover", opacity: 0.85, pointerEvents: "none" }} />
+                      )}
+                      <span style={{ position: "absolute", left: 5, bottom: 3, fontSize: 10, color: "#fff", textShadow: "0 0 3px #000" }}>
+                        {p.clip.source === "fal" ? "AI · " : ""}{(p.clip.durationMs / 1000).toFixed(1)}s
+                      </span>
+                    </div>
+                  );
+                })}
+                {/* joins between clips */}
+                {placed.slice(1).map((p) => {
+                  const t = p.clip.transitionIn;
+                  return (
+                    <div
+                      key={`join-${p.clip.id}`}
+                      onDragOver={(e) => {
+                        if (dragTransition.current) e.preventDefault();
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        const type = dragTransition.current ?? (e.dataTransfer.getData("text/plain") as TransitionType);
+                        dragTransition.current = null;
+                        if (TRANSITIONS.some((x) => x.id === type)) setTransition(p.clip.id, type);
+                      }}
+                      style={{ position: "absolute", left: `${pct(p.startMs)}%`, top: 0, bottom: 0, width: 30, transform: "translateX(-50%)", zIndex: 5, display: "flex", alignItems: "center", justifyContent: "center" }}
+                    >
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setOpenJoin(openJoin === p.clip.id ? null : p.clip.id);
+                        }}
+                        aria-label="Transition between clips"
+                        title="Add a transition"
+                        style={{ minWidth: 22, height: 22, padding: "0 6px", borderRadius: 11, border: t === "cut" ? "1px dashed #5a5a62" : "1px solid var(--accent)", background: "#121214", color: t === "cut" ? "#c4c4cc" : "#fff", fontSize: 10, cursor: "pointer", whiteSpace: "nowrap" }}
+                      >
+                        {transitionShort[t]}
+                      </button>
+                      {openJoin === p.clip.id && (
+                        <div style={{ position: "absolute", bottom: "100%", left: "50%", transform: "translateX(-50%)", marginBottom: 4, background: "#1b1b1f", border: "1px solid var(--border)", borderRadius: 8, padding: 4, display: "flex", flexDirection: "column", minWidth: 120, zIndex: 20, boxShadow: "0 8px 24px rgba(0,0,0,0.5)" }}>
+                          {TRANSITIONS.map((x) => (
+                            <button key={x.id} onClick={() => setTransition(p.clip.id, x.id)} style={{ textAlign: "left", background: x.id === t ? "var(--border)" : "none", border: 0, color: "var(--text)", padding: "6px 10px", borderRadius: 6, fontSize: 12, cursor: "pointer" }}>
+                              {x.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* captions lane */}
+              <div onMouseDown={(e) => e.target === e.currentTarget && seekFromEvent(e)} style={{ height: 44, position: "relative", borderTop: "1px solid var(--border)" }}>
+                {!project.captions.length && (
+                  <span className="muted" style={{ position: "absolute", left: 4, top: 14, fontSize: 11, pointerEvents: "none" }}>
+                    {audioUrl ? "Regenerate the voiceover to get timed captions" : "Captions appear when you generate a voiceover (Claude tab)"}
+                  </span>
+                )}
+                {project.captions.map((c) => {
+                  const sel = c.id === selectedCaptionId;
+                  return (
+                    <button
+                      key={c.id}
+                      onClick={() => {
+                        setSelectedClipId(null);
+                        setSelectedCaptionId(sel ? null : c.id);
+                        seek(c.startMs);
+                      }}
+                      title={c.text}
+                      style={{ position: "absolute", left: `${pct(c.startMs)}%`, width: `calc(${pct(c.endMs - c.startMs)}% - 2px)`, top: 8, bottom: 8, background: "#22262e", border: 0, boxShadow: sel ? "0 0 0 2px var(--accent)" : "none", borderRadius: 4, padding: "0 5px", fontSize: 10, color: "#b8c2d6", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis", textAlign: "left", cursor: "pointer" }}
+                    >
+                      {c.text}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* voice lane */}
+              <div onMouseDown={seekFromEvent} style={{ height: 44, position: "relative", borderTop: "1px solid var(--border)", cursor: "pointer" }}>
+                {audioUrl && audioMs > 0 ? (
+                  <div style={{ position: "absolute", left: 0, width: `${pct(audioMs)}%`, top: 10, bottom: 10, background: "repeating-linear-gradient(90deg,#3d5a6e 0 2px,transparent 2px 5px)", borderRadius: 4 }} />
+                ) : (
+                  <span className="muted" style={{ position: "absolute", left: 4, top: 14, fontSize: 11 }}>No voiceover yet</span>
+                )}
+              </div>
+
+              {/* playhead */}
+              {totalMs > 0 && (
+                <div style={{ position: "absolute", left: `${pct(timeMs)}%`, top: 0, bottom: 0, width: 2, marginLeft: -1, background: "var(--accent)", pointerEvents: "none", zIndex: 30 }}>
+                  <div style={{ position: "absolute", top: 0, left: -4, width: 10, height: 10, borderRadius: 2, background: "var(--accent)" }} />
+                </div>
+              )}
             </div>
           </div>
         </div>

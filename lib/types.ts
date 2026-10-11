@@ -1,9 +1,27 @@
+export type TransitionType = "cut" | "crossfade" | "slide" | "zoom";
+
+export const TRANSITIONS: { id: TransitionType; label: string }[] = [
+  { id: "cut", label: "Cut" },
+  { id: "crossfade", label: "Crossfade" },
+  { id: "slide", label: "Slide" },
+  { id: "zoom", label: "Zoom punch" },
+];
+
+export type ClipSource = "pexels" | "fal";
+
 export type Clip = {
   id: string;
   projectId: string;
   order: number;
+  /** Length of the clip on the timeline. */
   durationMs: number;
+  /** Where in the source video the clip starts. */
   trimStartMs: number;
+  /** Full length of the source video. */
+  sourceDurationMs: number;
+  source: ClipSource;
+  transitionIn: TransitionType;
+  transitionMs: number;
   pexelsVideoId: number;
   pexelsUrl: string;
   pexelsThumbnail: string;
@@ -11,6 +29,18 @@ export type Clip = {
   pexelsWidth: number;
   pexelsHeight: number;
 };
+
+export type CaptionWord = { text: string; startMs: number; endMs: number };
+
+export type Caption = {
+  id: string;
+  startMs: number;
+  endMs: number;
+  text: string;
+  words: CaptionWord[];
+};
+
+export type CaptionStyle = "bold" | "box" | "karaoke";
 
 export type ChatMessage = {
   role: "user" | "assistant";
@@ -31,6 +61,10 @@ export type Project = {
   clips: Clip[];
   voiceoverScript: string;
   voiceoverUrl: string;
+  captions: Caption[];
+  captionStyle: CaptionStyle;
+  budgetCents: number;
+  spentCents: number;
   createdAt: string;
   updatedAt: string;
 };
