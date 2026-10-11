@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { listProjects } from "@/lib/store";
 import NewProjectForm from "./new-project-form";
+import DeleteProjectButton from "./delete-project-button";
 
 export const dynamic = "force-dynamic";
 
@@ -19,7 +20,9 @@ export default async function HomePage() {
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 16 }}>
           {projects.map((p) => (
-            <Link key={p.id} href={`/projects/${p.id}`}>
+            <div key={p.id} style={{ position: "relative" }}>
+            <DeleteProjectButton id={p.id} title={p.title} />
+            <Link href={`/projects/${p.id}`}>
               <div className="card project-card">
                 <div
                   style={{
@@ -43,6 +46,7 @@ export default async function HomePage() {
                 </p>
               </div>
             </Link>
+            </div>
           ))}
         </div>
       )}
