@@ -70,7 +70,7 @@ export function buildAss(captions: Caption[], style: CaptionStyle) {
  * previous clip, which keeps rolling underneath until the transition ends.
  * `audioInput` is the input index of the voiceover (or -1 for none).
  */
-export function buildFilterGraph(project: Project, hasCaptions: boolean, audioInput: number) {
+export function buildFilterGraph(project: Project, hasCaptions: boolean, audioInput: number, musicInput = -1) {
   const placed = layoutClips(project.clips);
   const totalMs = clipsTotalMs(project.clips);
   const total = totalMs / 1000;
@@ -115,10 +115,19 @@ export function buildFilterGraph(project: Project, hasCaptions: boolean, audioIn
   } else {
     parts.push(`[${last}]null[vout]`);
   }
-  if (audioInput >= 0) {
-    parts.push(`[${audioInput}:a]aresample=44100,atrim=duration=${total.toFixed(3)},apad=whole_dur=${total.toFixed(3)}[aout]`);
+  const t = total.toFixed(3);
+  const fadeAt = Math.max(0, total - 1.5).toFixed(3);
+  const vol = (Math.min(100, Math.max(0, project.musicVolume ?? 25)) / 100).toFixed(2);
+  if (audioInput >= 0 && musicInput >= 0) {
+    parts.push(`[${audioInput}:a]aresample=44100,atrim=duration=${t},apad=whole_dur=${t}[vo]`);
+    parts.push(`[${musicInput}:a]aresample=44100,atrim=duration=${t},volume=${vol},afade=t=out:st=${fadeAt}:d=1.5[mu]`);
+    parts.push(`[vo][mu]amix=inputs=2:duration=first:normalize=0[aout]`);
+  } else if (audioInput >= 0) {
+    parts.push(`[${audioInput}:a]aresample=44100,atrim=duration=${t},apad=whole_dur=${t}[aout]`);
+  } else if (musicInput >= 0) {
+    parts.push(`[${musicInput}:a]aresample=44100,atrim=duration=${t},volume=${vol},afade=t=out:st=${fadeAt}:d=1.5,apad=whole_dur=${t}[aout]`);
   } else {
-    parts.push(`anullsrc=r=44100:cl=stereo,atrim=duration=${total.toFixed(3)}[aout]`);
+    parts.push(`anullsrc=r=44100:cl=stereo,atrim=duration=${t}[aout]`);
   }
   return { graph: parts.join(";\n"), totalMs };
 }

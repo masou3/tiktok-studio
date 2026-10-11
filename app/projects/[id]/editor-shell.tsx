@@ -95,6 +95,8 @@ export default function EditorShell({ project: initial }: { project: Project }) 
   const timeRef = useRef(0);
   const [audioMs, setAudioMs] = useState(0);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const musicRef = useRef<HTMLAudioElement>(null);
+  const [musicInput, setMusicInput] = useState("");
   const videoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
   const tracksRef = useRef<HTMLDivElement>(null);
 
@@ -150,6 +152,65 @@ export default function EditorShell({ project: initial }: { project: Project }) 
   function setTransition(clipId: string, type: TransitionType) {
     changeClip(clipId, { transitionIn: type }, 0);
     setOpenJoin(null);
+  }
+
+  // ---------- split / duplicate / edge trim ----------
+  const trimming = useRef(false);
+  const splitRef = useRef<() => void>(() => {});
+
+  async function clipAction(body: Record<string, unknown>) {
+    setSaveState("saving");
+    const res = await fetch(`/api/projects/${project.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (res.ok) setProject((await res.json()) as Project);
+    setSaveState("saved");
+    return res.ok;
+  }
+
+  async function splitAtPlayhead() {
+    const p = placed.find((x) => timeMs >= x.startMs + 500 && timeMs <= x.endMs - 500);
+    if (!p) return;
+    const ok = await clipAction({ action: "splitClip", clipId: p.clip.id, atMs: timeMs - p.startMs });
+    if (ok) setSelectedClipId(null);
+  }
+  splitRef.current = splitAtPlayhead;
+
+  async function duplicateSelected() {
+    if (!selectedClipId) return;
+    await clipAction({ action: "duplicateClip", clipId: selectedClipId });
+  }
+
+  function startEdgeTrim(e: React.MouseEvent, clip: Clip, edge: "left" | "right") {
+    e.preventDefault();
+    e.stopPropagation();
+    const width = tracksRef.current?.getBoundingClientRect().width ?? 0;
+    if (!width || !totalMs) return;
+    trimming.current = true;
+    setSelectedClipId(clip.id);
+    setSelectedCaptionId(null);
+    const startX = e.clientX;
+    const msPerPx = totalMs / width;
+    const orig = { trim: clip.trimStartMs, dur: clip.durationMs, src: clip.sourceDurationMs };
+    const move = (ev: MouseEvent) => {
+      const dMs = (ev.clientX - startX) * msPerPx;
+      if (edge === "right") {
+        const dur = Math.round(Math.min(orig.src - orig.trim, Math.max(500, orig.dur + dMs)) / 50) * 50;
+        changeClip(clip.id, { durationMs: dur });
+      } else {
+        const d = Math.round(Math.min(orig.dur - 500, Math.max(-orig.trim, dMs)) / 50) * 50;
+        changeClip(clip.id, { trimStartMs: orig.trim + d, durationMs: orig.dur - d });
+      }
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      setTimeout(() => (trimming.current = false), 0);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
   }
 
   async function saveTitle() {
@@ -262,6 +323,23 @@ export default function EditorShell({ project: initial }: { project: Project }) 
     }
   }, [timeMs, playing, placed, audioUrl, audioMs]);
 
+  // Background music: loops under the whole video, volume from the inspector.
+  useEffect(() => {
+    const m = musicRef.current;
+    if (!m || !project.musicUrl) return;
+    m.volume = Math.min(1, Math.max(0, project.musicVolume / 100));
+    if (playing) {
+      if (m.paused) m.play().catch(() => {});
+    } else if (!m.paused) {
+      m.pause();
+    }
+  }, [playing, project.musicUrl, project.musicVolume]);
+  useEffect(() => {
+    const m = musicRef.current;
+    if (!m || !project.musicUrl || playing) return;
+    if (m.duration && Number.isFinite(m.duration)) m.currentTime = (timeMs / 1000) % m.duration;
+  }, [timeMs, playing, project.musicUrl]);
+
   useEffect(() => {
     if (timeRef.current > totalMs) seek(totalMs);
   }, [totalMs, seek]);
@@ -281,6 +359,11 @@ export default function EditorShell({ project: initial }: { project: Project }) 
       if (e.key === " ") {
         e.preventDefault();
         togglePlay();
+        return;
+      }
+      if ((e.key === "s" || e.key === "S") && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        splitRef.current();
         return;
       }
       if (e.key !== "Delete" && e.key !== "Backspace") return;
@@ -817,6 +900,10 @@ export default function EditorShell({ project: initial }: { project: Project }) 
             <span className="muted" style={{ fontSize: 11 }}>
               {placed.length ? `Scene ${Math.max(1, sceneIdx + 1)} of ${placed.length} · ` : ""}{fmtTime(timeMs)}
             </span>
+            {project.musicUrl && (
+              // eslint-disable-next-line jsx-a11y/media-has-caption
+              <audio ref={musicRef} src={project.musicUrl} loop preload="auto" style={{ display: "none" }} />
+            )}
             {audioUrl && (
               // eslint-disable-next-line jsx-a11y/media-has-caption
               <audio ref={audioRef} src={audioUrl} preload="auto" onLoadedMetadata={(e) => setAudioMs(Math.round(e.currentTarget.duration * 1000))} style={{ display: "none" }} />
@@ -866,7 +953,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
                   <input id="clip-start" type="range" min={0} max={Math.max(0, selectedClip.sourceDurationMs - selectedClip.durationMs)} step={100} value={selectedClip.trimStartMs} disabled={selectedClip.sourceDurationMs <= selectedClip.durationMs} onChange={(e) => changeClip(selectedClip.id, { trimStartMs: Number(e.target.value) })} style={{ padding: 0, accentColor: "var(--accent)" }} />
                   <p className="muted" style={{ fontSize: 11, marginTop: 4 }}>Source is {(selectedClip.sourceDurationMs / 1000).toFixed(1)}s long.</p>
                 </div>
-                <p className="muted" style={{ fontSize: 11 }}>Drag clips to reorder. Press Delete to remove.</p>
+                <p className="muted" style={{ fontSize: 11 }}>Drag clips to reorder, drag their edges to trim, S to split at the playhead, Delete to remove.</p>
               </>
             ) : selectedCaption ? (
               <>
@@ -896,6 +983,36 @@ export default function EditorShell({ project: initial }: { project: Project }) 
               </div>
             </div>
 
+            <div>
+              <p style={label}>Background music</p>
+              {project.musicUrl ? (
+                <>
+                  <p style={{ fontSize: 12, marginBottom: 6, wordBreak: "break-all" }}>{project.musicName || "Music"}</p>
+                  <label style={{ ...label, display: "flex", justifyContent: "space-between" }} htmlFor="music-vol">
+                    <span>Volume</span><span>{project.musicVolume}%</span>
+                  </label>
+                  <input id="music-vol" type="range" min={0} max={100} step={5} value={project.musicVolume} onChange={(e) => setProject((p) => ({ ...p, musicVolume: Number(e.target.value) }))} onMouseUp={() => patch({ musicVolume: project.musicVolume })} onTouchEnd={() => patch({ musicVolume: project.musicVolume })} onKeyUp={() => patch({ musicVolume: project.musicVolume })} style={{ padding: 0, accentColor: "var(--accent)" }} />
+                  <button onClick={() => { setProject((p) => ({ ...p, musicUrl: "", musicName: "" })); patch({ musicUrl: "", musicName: "" }); }} style={{ marginTop: 8, width: "100%", padding: "6px 0", borderRadius: 6, fontSize: 12, cursor: "pointer", border: "1px solid var(--border)", background: "transparent", color: "var(--text)" }}>Remove music</button>
+                </>
+              ) : (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const url = musicInput.trim();
+                    if (!/^https?:\/\//i.test(url)) return;
+                    const name = decodeURIComponent(url.split("?")[0].split("/").pop() || "Music");
+                    setProject((p) => ({ ...p, musicUrl: url, musicName: name }));
+                    patch({ musicUrl: url, musicName: name });
+                    setMusicInput("");
+                  }}
+                  style={{ display: "flex", flexDirection: "column", gap: 6 }}
+                >
+                  <input value={musicInput} onChange={(e) => setMusicInput(e.target.value)} placeholder="Paste a direct link to an mp3" style={{ fontSize: 12 }} />
+                  <button type="submit" style={{ padding: "6px 0", borderRadius: 6, fontSize: 12, cursor: "pointer", border: "1px solid var(--border)", background: "transparent", color: "var(--text)" }}>Add music</button>
+                </form>
+              )}
+            </div>
+
             <div style={{ marginTop: "auto", border: "1px solid var(--border)", borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 6 }}>
               <p style={{ fontSize: 11 }} className="muted">AI clip budget</p>
               <div style={{ height: 6, background: "var(--border)", borderRadius: 999, overflow: "hidden" }}>
@@ -907,13 +1024,15 @@ export default function EditorShell({ project: initial }: { project: Project }) 
         </div>
 
         {/* ---------------- timeline ---------------- */}
-        <div style={{ height: 250, flexShrink: 0, borderTop: "1px solid var(--border)", background: "var(--panel)", display: "flex", flexDirection: "column" }}>
+        <div style={{ height: 296, flexShrink: 0, borderTop: "1px solid var(--border)", background: "var(--panel)", display: "flex", flexDirection: "column" }}>
           <div className="row" style={{ height: 42, flexShrink: 0, padding: "0 12px", borderBottom: "1px solid var(--border)", gap: 10 }}>
             <button onClick={togglePlay} disabled={!totalMs} aria-label={playing ? "Pause" : "Play"} style={{ background: "#e8e8ea", border: 0, color: "#121214", borderRadius: 6, padding: "5px 14px", fontWeight: 600, cursor: totalMs ? "pointer" : "default", opacity: totalMs ? 1 : 0.5 }}>
               {playing ? "Pause" : "Play"}
             </button>
             <span style={{ fontVariantNumeric: "tabular-nums", fontSize: 12, color: "#c4c4cc" }}>{fmtTime(timeMs)} / {fmtTime(totalMs)}</span>
             <span className="muted" style={{ fontSize: 11 }}>Space to play</span>
+            <button onClick={splitAtPlayhead} title="Cut the clip under the playhead in two (S)" style={{ ...chip, cursor: "pointer", border: "1px solid var(--border)", background: "transparent" }}>Split (S)</button>
+            <button onClick={duplicateSelected} disabled={!selectedClipId} title="Duplicate the selected clip" style={{ ...chip, cursor: selectedClipId ? "pointer" : "default", border: "1px solid var(--border)", background: "transparent", opacity: selectedClipId ? 1 : 0.5 }}>Duplicate</button>
             <div style={{ flex: 1 }} />
             <span className="muted" style={{ fontSize: 11 }}>Drag onto a + between clips:</span>
             {TRANSITIONS.filter((t) => t.id !== "cut").map((t) => (
@@ -927,6 +1046,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
               <div style={{ height: 64, display: "flex", alignItems: "center", padding: "0 10px", borderTop: "1px solid var(--border)" }}>Video</div>
               <div style={{ height: 44, display: "flex", alignItems: "center", padding: "0 10px", borderTop: "1px solid var(--border)" }}>Captions</div>
               <div style={{ height: 44, display: "flex", alignItems: "center", padding: "0 10px", borderTop: "1px solid var(--border)" }}>Voice</div>
+              <div style={{ height: 44, display: "flex", alignItems: "center", padding: "0 10px", borderTop: "1px solid var(--border)" }}>Music</div>
             </div>
 
             <div ref={tracksRef} style={{ flex: 1, minWidth: 0, position: "relative", margin: "0 14px" }}>
@@ -946,7 +1066,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
                     <div
                       key={p.clip.id}
                       draggable
-                      onDragStart={(e) => onClipDragStart(e, p.clip.id)}
+                      onDragStart={(e) => (trimming.current ? e.preventDefault() : onClipDragStart(e, p.clip.id))}
                       onDragOver={(e) => onClipDragOver(e, p.clip.id)}
                       onDrop={onClipDrop}
                       onClick={() => {
@@ -966,6 +1086,8 @@ export default function EditorShell({ project: initial }: { project: Project }) 
                       <span style={{ position: "absolute", left: 5, bottom: 3, fontSize: 10, color: "#fff", textShadow: "0 0 3px #000" }}>
                         {p.clip.source === "fal" ? "AI · " : ""}{(p.clip.durationMs / 1000).toFixed(1)}s
                       </span>
+                      <div onMouseDown={(e) => startEdgeTrim(e, p.clip, "left")} title="Drag to trim the start" style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 9, cursor: "ew-resize", background: sel ? "var(--accent)" : "rgba(255,255,255,0.25)", opacity: sel ? 0.9 : 0.6, zIndex: 3 }} />
+                      <div onMouseDown={(e) => startEdgeTrim(e, p.clip, "right")} title="Drag to trim the end" style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: 9, cursor: "ew-resize", background: sel ? "var(--accent)" : "rgba(255,255,255,0.25)", opacity: sel ? 0.9 : 0.6, zIndex: 3 }} />
                     </div>
                   );
                 })}
@@ -1043,6 +1165,17 @@ export default function EditorShell({ project: initial }: { project: Project }) 
                   <div style={{ position: "absolute", left: 0, width: `${pct(audioMs)}%`, top: 10, bottom: 10, background: "repeating-linear-gradient(90deg,#3d5a6e 0 2px,transparent 2px 5px)", borderRadius: 4 }} />
                 ) : (
                   <span className="muted" style={{ position: "absolute", left: 4, top: 14, fontSize: 11 }}>No voiceover yet</span>
+                )}
+              </div>
+
+              {/* music lane */}
+              <div onMouseDown={seekFromEvent} style={{ height: 44, position: "relative", borderTop: "1px solid var(--border)", cursor: "pointer" }}>
+                {project.musicUrl && totalMs > 0 ? (
+                  <div style={{ position: "absolute", left: 0, right: 0, top: 10, bottom: 10, background: "repeating-linear-gradient(90deg,#5e4a7a 0 2px,transparent 2px 6px)", borderRadius: 4, overflow: "hidden" }}>
+                    <span style={{ position: "absolute", left: 6, top: 3, fontSize: 10, color: "#fff", textShadow: "0 0 3px #000" }}>{project.musicName || "Music"}</span>
+                  </div>
+                ) : (
+                  <span className="muted" style={{ position: "absolute", left: 4, top: 14, fontSize: 11 }}>No music yet (add one in the right panel)</span>
                 )}
               </div>
 

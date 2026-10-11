@@ -33,6 +33,9 @@ function rowToProject(row: any): Project {
     clips: [],
     voiceoverScript: row.voiceover_script ?? "",
     voiceoverUrl: row.voiceover_url ?? "",
+    musicUrl: row.music_url ?? "",
+    musicName: row.music_name ?? "",
+    musicVolume: row.music_volume ?? 25,
     captions: Array.isArray(row.captions) ? row.captions : [],
     captionStyle: row.caption_style ?? "bold",
     budgetCents: row.budget_cents ?? 500,
@@ -119,7 +122,7 @@ export async function createProject(title: string): Promise<Project> {
 
 export async function updateProject(
   id: string,
-  patch: Partial<Pick<Project, "title" | "aiDisclosure" | "hashtags" | "durationMs" | "voiceoverScript" | "voiceoverUrl" | "captions" | "captionStyle" | "spentCents">>,
+  patch: Partial<Pick<Project, "title" | "aiDisclosure" | "hashtags" | "durationMs" | "voiceoverScript" | "voiceoverUrl" | "captions" | "captionStyle" | "spentCents" | "musicUrl" | "musicName" | "musicVolume">>,
 ): Promise<Project | null> {
   const body: Record<string, unknown> = { updated_at: new Date().toISOString() };
   if (typeof patch.title === "string") body.title = patch.title.trim() || "Untitled video";
@@ -131,6 +134,9 @@ export async function updateProject(
   if (Array.isArray(patch.captions)) body.captions = patch.captions as Caption[];
   if (typeof patch.captionStyle === "string") body.caption_style = patch.captionStyle as CaptionStyle;
   if (typeof patch.spentCents === "number") body.spent_cents = patch.spentCents;
+  if (typeof patch.musicUrl === "string") body.music_url = patch.musicUrl;
+  if (typeof patch.musicName === "string") body.music_name = patch.musicName;
+  if (typeof patch.musicVolume === "number") body.music_volume = Math.min(100, Math.max(0, Math.round(patch.musicVolume)));
 
   const res = await fetch(`${BASE}/rest/v1/tiktok_projects?id=eq.${id}`, {
     method: "PATCH",
@@ -246,4 +252,63 @@ export async function updateClip(
   if (!res.ok) return null;
   const rows = await res.json();
   return rowToClip(Array.isArray(rows) ? rows[0] : rows);
+}
+
+/** Insert a copy of a clip's source right after `afterClipId`, then renumber. */
+async function insertAfter(
+  projectId: string,
+  afterClipId: string,
+  clip: Parameters<typeof addClip>[1],
+): Promise<Clip | null> {
+  const created = await addClip(projectId, clip);
+  const project = await getProject(projectId);
+  if (!project) return null;
+  const ids = project.clips.map((c) => c.id).filter((id) => id !== created.id);
+  const at = ids.indexOf(afterClipId);
+  ids.splice(at < 0 ? ids.length : at + 1, 0, created.id);
+  await reorderClips(projectId, ids);
+  return created;
+}
+
+function cloneFields(c: Clip): Parameters<typeof addClip>[1] {
+  return {
+    durationMs: c.durationMs,
+    trimStartMs: c.trimStartMs,
+    sourceDurationMs: c.sourceDurationMs,
+    source: c.source,
+    pexelsVideoId: c.pexelsVideoId,
+    pexelsUrl: c.pexelsUrl,
+    pexelsThumbnail: c.pexelsThumbnail,
+    pexelsAuthor: c.pexelsAuthor,
+    pexelsWidth: c.pexelsWidth,
+    pexelsHeight: c.pexelsHeight,
+    transitionIn: "cut",
+  };
+}
+
+const MIN_CLIP_MS = 500;
+
+/** Cut a clip in two at `atMs` (measured from the clip's own start). */
+export async function splitClip(projectId: string, clipId: string, atMs: number): Promise<boolean> {
+  const project = await getProject(projectId);
+  const clip = project?.clips.find((c) => c.id === clipId);
+  if (!clip) return false;
+  const at = Math.round(atMs);
+  if (at < MIN_CLIP_MS || clip.durationMs - at < MIN_CLIP_MS) return false;
+  const second = {
+    ...cloneFields(clip),
+    trimStartMs: clip.trimStartMs + at,
+    durationMs: clip.durationMs - at,
+  };
+  const first = await updateClip(clipId, { durationMs: at });
+  if (!first) return false;
+  const made = await insertAfter(projectId, clipId, second);
+  return !!made;
+}
+
+export async function duplicateClip(projectId: string, clipId: string): Promise<boolean> {
+  const project = await getProject(projectId);
+  const clip = project?.clips.find((c) => c.id === clipId);
+  if (!clip) return false;
+  return !!(await insertAfter(projectId, clipId, cloneFields(clip)));
 }

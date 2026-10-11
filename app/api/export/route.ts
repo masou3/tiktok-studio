@@ -68,6 +68,12 @@ export async function POST(req: Request) {
       }
     }
 
+    let musicFile = "";
+    if (project.musicUrl) {
+      musicFile = path.join(dir, "music.bin");
+      await download(project.musicUrl, musicFile);
+    }
+
     // 2. Captions + font
     const hasCaptions = project.captions.length > 0;
     if (hasCaptions) {
@@ -79,11 +85,13 @@ export async function POST(req: Request) {
 
     // 3. Render
     const audioIndex = audioFile ? project.clips.length : -1;
-    const { graph, totalMs } = buildFilterGraph(project, hasCaptions, audioIndex);
+    const musicIndex = musicFile ? project.clips.length + (audioFile ? 1 : 0) : -1;
+    const { graph, totalMs } = buildFilterGraph(project, hasCaptions, audioIndex, musicIndex);
     await writeFile(path.join(dir, "graph.txt"), graph);
     const args = ["-y", "-hide_banner", "-loglevel", "error"];
     for (const c of project.clips) args.push("-i", files.get(c.pexelsUrl)!);
     if (audioFile) args.push("-i", audioFile);
+    if (musicFile) args.push("-stream_loop", "-1", "-i", musicFile);
     args.push(
       "-filter_complex_script", "graph.txt",
       "-map", "[vout]", "-map", "[aout]",

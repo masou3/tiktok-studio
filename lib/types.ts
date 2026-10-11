@@ -61,6 +61,10 @@ export type Project = {
   clips: Clip[];
   voiceoverScript: string;
   voiceoverUrl: string;
+  musicUrl: string;
+  musicName: string;
+  /** 0 to 100 */
+  musicVolume: number;
   captions: Caption[];
   captionStyle: CaptionStyle;
   budgetCents: number;

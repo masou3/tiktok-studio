@@ -8,6 +8,8 @@ import {
   reorderClips,
   trimClip,
   updateClip,
+  splitClip,
+  duplicateClip,
 } from "@/lib/store";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -43,6 +45,17 @@ export async function PATCH(req: Request, { params }: Ctx) {
     return NextResponse.json(clip);
   }
 
+  if (body.action === "splitClip") {
+    const ok = await splitClip(id, body.clipId as string, Number(body.atMs));
+    if (!ok) return NextResponse.json({ error: "Can't split there" }, { status: 400 });
+    return NextResponse.json(await getProject(id));
+  }
+  if (body.action === "duplicateClip") {
+    const ok = await duplicateClip(id, body.clipId as string);
+    if (!ok) return NextResponse.json({ error: "Duplicate failed" }, { status: 400 });
+    return NextResponse.json(await getProject(id));
+  }
+
   if (body.action === "updateClip") {
     const clip = await updateClip(body.clipId as string, body.fields ?? {});
     if (!clip) return NextResponse.json({ error: "Update failed" }, { status: 400 });
@@ -55,6 +68,9 @@ export async function PATCH(req: Request, { params }: Ctx) {
     ...(Array.isArray(body.hashtags) ? { hashtags: body.hashtags.map(String) } : {}),
     ...(typeof body.voiceoverScript === "string" ? { voiceoverScript: body.voiceoverScript } : {}),
     ...(typeof body.voiceoverUrl === "string" ? { voiceoverUrl: body.voiceoverUrl } : {}),
+    ...(typeof body.musicUrl === "string" ? { musicUrl: body.musicUrl } : {}),
+    ...(typeof body.musicName === "string" ? { musicName: body.musicName } : {}),
+    ...(typeof body.musicVolume === "number" ? { musicVolume: body.musicVolume } : {}),
     ...(Array.isArray(body.captions) ? { captions: body.captions } : {}),
     ...(["bold", "box", "karaoke"].includes(body.captionStyle) ? { captionStyle: body.captionStyle } : {}),
   });
