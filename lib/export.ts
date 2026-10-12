@@ -1,4 +1,4 @@
-import type { Caption, CaptionStyle, Project } from "./types";
+import type { Caption, CaptionStyle, Look, Project } from "./types";
 import { layoutClips, clipsTotalMs } from "./timeline";
 
 export const W = 1080;
@@ -21,6 +21,7 @@ const clean = (t: string) => t.replace(/[{}\\]/g, "").replace(/\n/g, " ");
 export function buildAss(captions: Caption[], style: CaptionStyle) {
   const box = style === "box";
   const tiktok = style === "tiktok";
+  const neon = style === "neon";
   const size = tiktok ? 96 : box ? 70 : 84;
   // Colours are &HAABBGGRR. White text, black outline; box style uses a dark box.
   const styleLine = tiktok
@@ -39,6 +40,9 @@ export function buildAss(captions: Caption[], style: CaptionStyle) {
     "[V4+ Styles]",
     "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
     styleLine,
+    // Neon: a soft yellow glow layer under crisp pale-yellow text.
+    `Style: Glow,Poppins,76,&H0028F0F0,&H0028F0F0,&H0028F0F0,&H00000000,-1,0,0,0,100,100,2,0,1,10,0,2,70,70,430,1`,
+    `Style: Neon,Poppins,76,&H00D8FFF4,&H00D8FFF4,&H0028F0F0,&H00000000,-1,0,0,0,100,100,2,0,1,2,0,2,70,70,430,1`,
     "",
     "[Events]",
     "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
@@ -47,6 +51,13 @@ export function buildAss(captions: Caption[], style: CaptionStyle) {
     lines.push(`Dialogue: 0,${assTime(a)},${assTime(b)},Cap,,0,0,0,,${text}`);
 
   for (const c of captions) {
+    if (neon) {
+      // Whole phrase at once (1 to 3 words), uppercase, quick fade, with a glow underneath.
+      const t = clean(c.text).toUpperCase();
+      lines.push(`Dialogue: 0,${assTime(c.startMs)},${assTime(c.endMs)},Glow,,0,0,0,,{\\blur14\\alpha&H70&\\fad(90,70)}${t}`);
+      lines.push(`Dialogue: 1,${assTime(c.startMs)},${assTime(c.endMs)},Neon,,0,0,0,,{\\blur1.2\\fad(90,70)}${t}`);
+      continue;
+    }
     if (tiktok && c.words.length) {
       // One word lit at a time, popping in, like TikTok's own auto-captions.
       const words = c.words;
@@ -85,6 +96,67 @@ export function buildAss(captions: Caption[], style: CaptionStyle) {
 }
 
 /**
+ * Effects applied to the finished frame while a transition plays (blur,
+ * glitch). Blur strength steps down over thirds of the transition, which at
+ * 30 fps reads as a smooth settle. Returns "" for transitions with no extra pass.
+ */
+export function transitionPost(kind: string, S: number, T: number): string {
+  const f3 = (n: number) => n.toFixed(3);
+  const win = (a: number, b: number) => `enable='between(t,${f3(a)},${f3(b)})'`;
+  const third = T / 3;
+  if (kind === "whip") {
+    return [90, 45, 14].map((r, n) => `dblur=angle=0:radius=${r}:${win(S + n * third, S + (n + 1) * third)}`).join(",");
+  }
+  if (kind === "spin") {
+    return [16, 8, 3].map((sg, n) => `gblur=sigma=${sg}:${win(S + n * third, S + (n + 1) * third)}`).join(",");
+  }
+  if (kind === "glitch") {
+    // Smear the outgoing shot into vertical streaks, dip to near-black, then resolve into the next one.
+    const parts: string[] = [];
+    parts.push(`pixelize=w=56:h=520:${win(S - 0.14, S - 0.04)}`);
+    parts.push(`chromashift=crh=-26:cbh=26:${win(S - 0.14, S - 0.04)}`);
+    parts.push(`eq=brightness=-0.85:${win(S - 0.04, S + 0.04)}`);
+    [[44, 420], [26, 200], [12, 60]].forEach(([w, h], n) => {
+      parts.push(`pixelize=w=${w}:h=${h}:${win(S + 0.04 + n * third, S + 0.04 + (n + 1) * third)}`);
+    });
+    [-20, -11, -4].forEach((c, n) => {
+      parts.push(`chromashift=crh=${c}:cbh=${-c}:${win(S + 0.04 + n * third, S + 0.04 + (n + 1) * third)}`);
+    });
+    return parts.join(",");
+  }
+  return "";
+}
+
+/**
+ * Whole-video finish (grain, scanlines, vignette, colour fringing) as one
+ * ffmpeg filter chain, or "" when everything is off. Applied before captions
+ * so the text stays crisp.
+ */
+export function buildLookChain(look: Look | undefined): string {
+  if (!look) return "";
+  const f: string[] = [];
+  if (look.rgb > 0) {
+    const px = Math.max(1, Math.round((look.rgb / 100) * 7));
+    f.push(`rgbashift=rh=-${px}:bh=${px}:edge=smear`);
+  }
+  if (look.vignette > 0) {
+    // Smaller angle = harder vignette.
+    const angle = (0.9 - (look.vignette / 100) * 0.55).toFixed(3);
+    f.push(`vignette=angle=${angle}:mode=backward:eval=init`);
+  }
+  if (look.scanlines > 0) {
+    const a = ((look.scanlines / 100) * 0.35).toFixed(3);
+    f.push(`drawgrid=w=0:h=4:t=1:c=black@${a}`);
+  }
+  if (look.grain > 0) {
+    const g = Math.max(2, Math.round((look.grain / 100) * 22));
+    f.push(`noise=alls=${g}:allf=t`);
+  }
+  if (!f.length) return "";
+  return f.join(",") + ",format=yuv420p";
+}
+
+/**
  * Build the ffmpeg filter graph. Mirrors layerAt() in timeline.ts:
  * each clip's transition-in plays over its first transitionMs on top of the
  * previous clip, which keeps rolling underneath until the transition ends.
@@ -117,6 +189,17 @@ export function buildFilterGraph(project: Project, hasCaptions: boolean, audioIn
       chain += `,format=yuva420p,fade=t=in:st=${S.toFixed(3)}:d=${T.toFixed(3)}:alpha=1`;
     } else if (kind === "slide") {
       x = `W*pow(1-${prog},3)`;
+    } else if (kind === "whip") {
+      x = `W*pow(1-${prog},3)`;
+    } else if (kind === "spin") {
+      // Zoomed-in and rotated, settling flat. Rotate on a fixed-size frame (crop after the zoom).
+      const k = `clip((t-${S.toFixed(3)})/${T.toFixed(3)},0,1)`;
+      chain += `,scale=w='${W}*(1.7-0.7*(1-pow(1-${k},3)))':h=-2:eval=frame,crop=${W}:${H},format=yuva420p,rotate=a='-0.55*pow(1-${k},3)':ow=${W}:oh=${H}:c=none`;
+    } else if (kind === "glitch") {
+      // The glitch itself is applied to the finished frame below.
+    } else if (kind === "flash") {
+      // Cut to white, then settle into the clip.
+      chain += `,format=yuv420p,fade=t=in:st=${S.toFixed(3)}:d=${T.toFixed(3)}:color=white`;
     } else if (kind === "zoom") {
       chain += `,scale=w='${W}*(1+0.35*pow(1-${prog},3))':h=-2:eval=frame,format=yuva420p,fade=t=in:st=${S.toFixed(3)}:d=${(T / 2).toFixed(3)}:alpha=1`;
       x = "(W-w)/2";
@@ -124,12 +207,18 @@ export function buildFilterGraph(project: Project, hasCaptions: boolean, audioIn
     }
     parts.push(`${chain}[v${i}]`);
     const E = S + L;
+    const post = transitionPost(kind, S, T);
     parts.push(
-      `[b${i}][v${i}]overlay=x='${x}':y='${y}':format=auto:eof_action=pass:enable='between(t,${S.toFixed(3)},${E.toFixed(3)})'[b${i + 1}]`,
+      `[b${i}][v${i}]overlay=x='${x}':y='${y}':format=auto:eof_action=pass:enable='between(t,${S.toFixed(3)},${E.toFixed(3)})'${post ? `[o${i}];[o${i}]${post}` : ""}[b${i + 1}]`,
     );
   });
 
-  const last = `b${placed.length}`;
+  let last = `b${placed.length}`;
+  const lookChain = buildLookChain(project.look);
+  if (lookChain) {
+    parts.push(`[${last}]${lookChain}[lk]`);
+    last = "lk";
+  }
   if (hasCaptions) {
     parts.push(`[${last}]ass=captions.ass:fontsdir=fonts[vout]`);
   } else {

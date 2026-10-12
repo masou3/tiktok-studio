@@ -61,7 +61,7 @@ export type LayerState = {
   visible: boolean;
   /** Position inside the source video, in ms. */
   localMs: number;
-  style: { opacity: number; transform: string; zIndex: number };
+  style: { opacity: number; transform: string; filter: string; zIndex: number };
 };
 
 /**
@@ -79,17 +79,36 @@ export function layerAt(placed: PlacedClip[], i: number, t: number): LayerState 
 
   let opacity = 1;
   let transform = "none";
+  let filter = "none";
   const T = p.clip.transitionMs;
   if (i > 0 && p.clip.transitionIn !== "cut" && t >= p.startMs && t < p.startMs + T) {
     const k = easeOut((t - p.startMs) / T);
     if (p.clip.transitionIn === "crossfade") opacity = k;
     if (p.clip.transitionIn === "slide") transform = `translateX(${(1 - k) * 100}%)`;
+    if (p.clip.transitionIn === "whip") {
+      transform = `translateX(${(1 - k) * 100}%)`;
+      filter = `blur(${((1 - k) * 7).toFixed(1)}px)`;
+    }
+    if (p.clip.transitionIn === "spin") {
+      transform = `rotate(${(-(1 - k) * 28).toFixed(1)}deg) scale(${1 + 0.6 * (1 - k)})`;
+      filter = `blur(${((1 - k) * 6).toFixed(1)}px)`;
+    }
+    if (p.clip.transitionIn === "glitch") {
+      const j = 1 - k;
+      opacity = k < 0.12 ? 0 : 1;
+      transform = `translateX(${(Math.sin(k * 60) * j * 14).toFixed(1)}px)`;
+      filter = `blur(${(j * 2.5).toFixed(1)}px) saturate(${(1 + j * 2.2).toFixed(2)}) hue-rotate(${(j * 90).toFixed(0)}deg)`;
+    }
+    if (p.clip.transitionIn === "flash") {
+      // Hit white, then settle into the clip. The overlay is drawn by the editor.
+      opacity = 1;
+    }
     if (p.clip.transitionIn === "zoom") {
       transform = `scale(${1.35 - 0.35 * k})`;
       opacity = Math.min(1, k * 2);
     }
   }
-  return { visible, localMs, style: { opacity, transform, zIndex: i + 1 } };
+  return { visible, localMs, style: { opacity, transform, filter, zIndex: i + 1 } };
 }
 
 /**

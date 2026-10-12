@@ -1,10 +1,14 @@
-export type TransitionType = "cut" | "crossfade" | "slide" | "zoom";
+export type TransitionType = "cut" | "crossfade" | "slide" | "zoom" | "flash" | "whip" | "spin" | "glitch";
 
 export const TRANSITIONS: { id: TransitionType; label: string }[] = [
   { id: "cut", label: "Cut" },
   { id: "crossfade", label: "Crossfade" },
   { id: "slide", label: "Slide" },
   { id: "zoom", label: "Zoom punch" },
+  { id: "flash", label: "White flash" },
+  { id: "whip", label: "Whip blur" },
+  { id: "spin", label: "Spin zoom" },
+  { id: "glitch", label: "Glitch" },
 ];
 
 /** "image" is a still (like a brand end card) held for the clip length. */
@@ -41,7 +45,34 @@ export type Caption = {
   words: CaptionWord[];
 };
 
-export type CaptionStyle = "tiktok" | "bold" | "box" | "karaoke";
+export type CaptionStyle = "tiktok" | "bold" | "box" | "karaoke" | "neon";
+
+/** Whole-video finish. Each value is 0 (off) to 100 (full). */
+export type Look = {
+  /** Film grain. */
+  grain: number;
+  /** Horizontal scanlines, like an old TV. */
+  scanlines: number;
+  /** Darkened corners. */
+  vignette: number;
+  /** Red/blue colour fringing. */
+  rgb: number;
+};
+
+export const NO_LOOK: Look = { grain: 0, scanlines: 0, vignette: 0, rgb: 0 };
+
+/** One-tap starting points for the Look controls. */
+export const LOOK_PRESETS: { id: string; label: string; look: Look }[] = [
+  { id: "clean", label: "Clean", look: NO_LOOK },
+  { id: "vhs", label: "VHS", look: { grain: 35, scanlines: 55, vignette: 40, rgb: 45 } },
+  { id: "film", label: "Film", look: { grain: 50, scanlines: 0, vignette: 55, rgb: 0 } },
+];
+
+export function cleanLook(v: unknown): Look {
+  const o = (v && typeof v === "object" ? v : {}) as Record<string, unknown>;
+  const n = (x: unknown) => Math.min(100, Math.max(0, Math.round(typeof x === "number" ? x : 0)));
+  return { grain: n(o.grain), scanlines: n(o.scanlines), vignette: n(o.vignette), rgb: n(o.rgb) };
+}
 
 export type ChatMessage = {
   role: "user" | "assistant";
@@ -70,6 +101,7 @@ export type Project = {
   musicFadeMs: number;
   captions: Caption[];
   captionStyle: CaptionStyle;
+  look: Look;
   budgetCents: number;
   spentCents: number;
   createdAt: string;

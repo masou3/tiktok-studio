@@ -2,6 +2,7 @@
 // Set SUPABASE_URL and SUPABASE_ANON_KEY in .env.local
 // RLS must be disabled (or policies set to allow all) on tiktok_projects and tiktok_clips.
 
+import { cleanLook } from "./types";
 import type { Caption, CaptionStyle, Clip, LibraryClip, Project, ProjectCard, TransitionType } from "./types";
 
 const BASE = process.env.SUPABASE_URL!;
@@ -39,6 +40,7 @@ function rowToProject(row: any): Project {
     musicFadeMs: row.music_fade_ms ?? 1500,
     captions: Array.isArray(row.captions) ? row.captions : [],
     captionStyle: row.caption_style ?? "tiktok",
+    look: cleanLook(row.look),
     budgetCents: row.budget_cents ?? 500,
     spentCents: row.spent_cents ?? 0,
     createdAt: row.created_at,
@@ -123,7 +125,7 @@ export async function createProject(title: string): Promise<Project> {
 
 export async function updateProject(
   id: string,
-  patch: Partial<Pick<Project, "title" | "aiDisclosure" | "hashtags" | "durationMs" | "voiceoverScript" | "voiceoverUrl" | "captions" | "captionStyle" | "spentCents" | "musicUrl" | "musicName" | "musicVolume" | "musicFadeMs">>,
+  patch: Partial<Pick<Project, "title" | "aiDisclosure" | "hashtags" | "durationMs" | "voiceoverScript" | "voiceoverUrl" | "captions" | "captionStyle" | "look" | "spentCents" | "musicUrl" | "musicName" | "musicVolume" | "musicFadeMs">>,
 ): Promise<Project | null> {
   const body: Record<string, unknown> = { updated_at: new Date().toISOString() };
   if (typeof patch.title === "string") body.title = patch.title.trim() || "Untitled video";
@@ -134,6 +136,7 @@ export async function updateProject(
   if (typeof patch.voiceoverUrl === "string") body.voiceover_url = patch.voiceoverUrl;
   if (Array.isArray(patch.captions)) body.captions = patch.captions as Caption[];
   if (typeof patch.captionStyle === "string") body.caption_style = patch.captionStyle as CaptionStyle;
+  if (patch.look) body.look = cleanLook(patch.look);
   if (typeof patch.spentCents === "number") body.spent_cents = patch.spentCents;
   if (typeof patch.musicUrl === "string") body.music_url = patch.musicUrl;
   if (typeof patch.musicFadeMs === "number") body.music_fade_ms = Math.min(5000, Math.max(0, Math.round(patch.musicFadeMs)));
@@ -234,7 +237,7 @@ export async function trimClip(
   return rowToClip(Array.isArray(rows) ? rows[0] : rows);
 }
 
-const TRANSITION_IDS: TransitionType[] = ["cut", "crossfade", "slide", "zoom"];
+const TRANSITION_IDS: TransitionType[] = ["cut", "crossfade", "slide", "zoom", "flash", "whip", "spin", "glitch"];
 
 export async function updateClip(
   clipId: string,
@@ -383,6 +386,7 @@ export async function duplicateProject(id: string): Promise<Project | null> {
       music_fade_ms: src.musicFadeMs,
       captions: src.captions,
       caption_style: src.captionStyle,
+      look: src.look,
       budget_cents: src.budgetCents,
       spent_cents: 0,
       created_at: now,

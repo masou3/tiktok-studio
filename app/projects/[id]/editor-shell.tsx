@@ -1,8 +1,8 @@
 "use client";
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import type { Project, Clip, ChatMessage, Caption, CaptionStyle, TransitionType, CaptionWord, LibraryClip } from "@/lib/types";
-import { TRANSITIONS } from "@/lib/types";
+import type { Project, Clip, ChatMessage, Caption, CaptionStyle, TransitionType, CaptionWord, LibraryClip, Look } from "@/lib/types";
+import { TRANSITIONS, LOOK_PRESETS } from "@/lib/types";
 import { layoutClips, clipsTotalMs, fmtTime, buildCaptions, captionAt, layerAt, wordsFromScript } from "@/lib/timeline";
 
 type PexelsVideo = {
@@ -29,7 +29,7 @@ type FalJob = {
 
 const DEFAULT_CLIP_MS = 5000;
 const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
-const transitionShort: Record<TransitionType, string> = { cut: "+", crossfade: "Fade", slide: "Slide", zoom: "Zoom" };
+const transitionShort: Record<TransitionType, string> = { cut: "+", crossfade: "Fade", slide: "Slide", zoom: "Zoom", flash: "Flash", whip: "Whip", spin: "Spin", glitch: "Glitch" };
 
 function loadJobs(projectId: string): FalJob[] {
   try {
@@ -783,6 +783,24 @@ export default function EditorShell({ project: initial }: { project: Project }) 
   const falCost = falSeconds === 10 ? 70 : 35;
   const ticks = totalMs > 0 ? [0, 0.2, 0.4, 0.6, 0.8].map((f) => f * totalMs) : [];
 
+  // White flash transition: the white fades away over the clip's transition time.
+  const flashOpacity = (() => {
+    for (let i = 1; i < placed.length; i++) {
+      const c = placed[i].clip;
+      if (c.transitionIn !== "flash") continue;
+      const T = Math.max(50, c.transitionMs);
+      const d = timeMs - placed[i].startMs;
+      if (d >= 0 && d < T) return Math.pow(1 - d / T, 3);
+    }
+    return 0;
+  })();
+
+  function setLook(next: Partial<Look>, save = false) {
+    const look = { ...project.look, ...next };
+    setProject((p) => ({ ...p, look }));
+    if (save) patch({ look });
+  }
+
   function renderCaption(c: Caption) {
     const style = project.captionStyle;
     if (style === "tiktok") {
@@ -801,6 +819,11 @@ export default function EditorShell({ project: initial }: { project: Project }) 
             </span>
           ))}
         </span>
+      );
+    }
+    if (style === "neon") {
+      return (
+        <span style={{ fontFamily: "Poppins, Montserrat, 'Arial Black', Arial, sans-serif", fontWeight: 700, fontSize: 18, lineHeight: 1.15, textTransform: "uppercase", letterSpacing: 0.5, color: "#f4ffd8", textShadow: "0 0 3px #f0f028, 0 0 8px #f0f028, 0 0 16px rgba(240,240,40,0.7)" }}>{c.text}</span>
       );
     }
     if (style === "karaoke" && c.words.length) {
@@ -1044,7 +1067,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
                       src={p.clip.pexelsUrl}
                       alt=""
                       draggable={false}
-                      style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", visibility: st.visible ? "visible" : "hidden", opacity: st.style.opacity, transform: st.style.transform, zIndex: st.style.zIndex }}
+                      style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", visibility: st.visible ? "visible" : "hidden", opacity: st.style.opacity, transform: st.style.transform, filter: st.style.filter, zIndex: st.style.zIndex }}
                     />
                   ) : (
                   // eslint-disable-next-line jsx-a11y/media-has-caption
@@ -1057,7 +1080,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
                     muted
                     playsInline
                     preload="auto"
-                    style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", visibility: st.visible ? "visible" : "hidden", opacity: st.style.opacity, transform: st.style.transform, zIndex: st.style.zIndex }}
+                    style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", visibility: st.visible ? "visible" : "hidden", opacity: st.style.opacity, transform: st.style.transform, filter: st.style.filter, zIndex: st.style.zIndex }}
                   />
                   )
                 );
@@ -1066,6 +1089,18 @@ export default function EditorShell({ project: initial }: { project: Project }) 
                 <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
                   <span className="muted" style={{ fontSize: 13 }}>No clips yet</span>
                 </div>
+              )}
+              {project.look.vignette > 0 && (
+                <div style={{ position: "absolute", inset: 0, zIndex: 90, pointerEvents: "none", background: `radial-gradient(ellipse at center, rgba(0,0,0,0) 45%, rgba(0,0,0,${(project.look.vignette / 100) * 0.85}) 100%)` }} />
+              )}
+              {project.look.scanlines > 0 && (
+                <div style={{ position: "absolute", inset: 0, zIndex: 91, pointerEvents: "none", background: `repeating-linear-gradient(to bottom, rgba(0,0,0,${(project.look.scanlines / 100) * 0.4}) 0px, rgba(0,0,0,${(project.look.scanlines / 100) * 0.4}) 1px, rgba(0,0,0,0) 1px, rgba(0,0,0,0) 2px)` }} />
+              )}
+              {project.look.grain > 0 && (
+                <div style={{ position: "absolute", inset: 0, zIndex: 92, pointerEvents: "none", opacity: (project.look.grain / 100) * 0.35, mixBlendMode: "overlay", backgroundImage: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='120' height='120' filter='url(%23n)'/></svg>\")" }} />
+              )}
+              {flashOpacity > 0 && (
+                <div style={{ position: "absolute", inset: 0, zIndex: 95, pointerEvents: "none", background: "#fff", opacity: flashOpacity }} />
               )}
               {currentCaption && (
                 <div style={{ position: "absolute", left: 14, right: 14, bottom: "27%", textAlign: "center", zIndex: 100, pointerEvents: "none" }}>
@@ -1158,7 +1193,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
             <div>
               <p style={label}>Caption style</p>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
-                {(["tiktok", "bold", "box", "karaoke"] as const).map((s) => (
+                {(["tiktok", "bold", "box", "karaoke", "neon"] as const).map((s) => (
                   <button key={s} onClick={() => setCaptionStyle(s)} style={{ flex: 1, padding: "6px 0", borderRadius: 6, fontSize: 12, cursor: "pointer", border: "1px solid var(--border)", background: project.captionStyle === s ? "var(--border)" : "transparent", color: "var(--text)", textTransform: "capitalize" }}>{s === "tiktok" ? "TikTok" : s}</button>
                 ))}
               </div>
@@ -1174,6 +1209,24 @@ export default function EditorShell({ project: initial }: { project: Project }) 
                   )}
                 </div>
               )}
+            </div>
+
+            <div>
+              <p style={label}>Look</p>
+              <div className="row" style={{ gap: 4, marginBottom: 8 }}>
+                {LOOK_PRESETS.map((pr) => (
+                  <button key={pr.id} onClick={() => setLook(pr.look, true)} style={{ flex: 1, padding: "5px 0", borderRadius: 6, fontSize: 12, cursor: "pointer", border: "1px solid var(--border)", background: "transparent", color: "var(--text)" }}>{pr.label}</button>
+                ))}
+              </div>
+              {([["grain", "Grain"], ["scanlines", "Scanlines"], ["vignette", "Vignette"], ["rgb", "Colour split"]] as const).map(([k, name]) => (
+                <div key={k} style={{ marginBottom: 6 }}>
+                  <label style={{ ...label, display: "flex", justifyContent: "space-between", marginBottom: 2 }} htmlFor={`look-${k}`}>
+                    <span>{name}</span><span>{project.look[k]}</span>
+                  </label>
+                  <input id={`look-${k}`} type="range" min={0} max={100} step={5} value={project.look[k]} onChange={(e) => setLook({ [k]: Number(e.target.value) })} onMouseUp={() => patch({ look: project.look })} onTouchEnd={() => patch({ look: project.look })} onKeyUp={() => patch({ look: project.look })} style={{ padding: 0, accentColor: "var(--accent)" }} />
+                </div>
+              ))}
+              <p className="muted" style={{ fontSize: 11 }}>Applied when you export. The preview is an approximation, and colour split only shows in the export.</p>
             </div>
 
             <div>
