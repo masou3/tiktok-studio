@@ -1,4 +1,4 @@
-import type { Caption, CaptionStyle, Look, Project } from "./types";
+import type { Caption, CaptionStyle, Effect, Look, Project } from "./types";
 import { layoutClips, clipsTotalMs } from "./timeline";
 
 export const W = 1080;
@@ -157,6 +157,70 @@ export function buildLookChain(look: Look | undefined): string {
 }
 
 /**
+ * Timeline effects (push, pull, shake, flash, glitch, blur, rgb) as one filter
+ * chain, or "" when there are none. Camera moves share one scale+crop stage;
+ * the rest are timeline-windowed filters. Mirrors effectState() in timeline.ts.
+ */
+export function buildEffectsChain(effects: Effect[] | undefined, W: number, H: number): string {
+  if (!effects || !effects.length) return "";
+  const f3 = (n: number) => n.toFixed(3);
+  const out: string[] = [];
+  const terms: string[] = [];
+  const sx: string[] = [];
+  const sy: string[] = [];
+  for (const e of effects) {
+    const a = e.startMs / 1000;
+    const d = e.durationMs / 1000;
+    const b = a + d;
+    const k = e.strength / 100;
+    const win = `between(t,${f3(a)},${f3(b)})`;
+    const prog = `clip((t-${f3(a)})/${f3(d)},0,1)`;
+    if (e.type === "push") terms.push(`${win}*${f3(0.05 + 0.3 * k)}*${prog}`);
+    if (e.type === "pull") terms.push(`${win}*${f3(0.05 + 0.3 * k)}*(1-${prog})`);
+    if (e.type === "shake") {
+      terms.push(`${win}*0.1`);
+      const amp = 6 + 36 * k;
+      sx.push(`${win}*${f3(amp)}*sin(t*61)`);
+      sy.push(`${win}*${f3(amp * 0.8)}*cos(t*53)`);
+    }
+  }
+  if (terms.length || sx.length) {
+    const Z = `(1+${terms.length ? terms.join("+") : "0"})`;
+    out.push(`scale=w='trunc(${W}*${Z}/2)*2':h='trunc(${H}*${Z}/2)*2':eval=frame`);
+    out.push(`crop=${W}:${H}:x='(iw-${W})/2+${sx.length ? sx.join("+") : "0"}':y='(ih-${H})/2+${sy.length ? sy.join("+") : "0"}'`);
+    out.push("setsar=1");
+  }
+  for (const e of effects) {
+    const a = e.startMs / 1000;
+    const d = e.durationMs / 1000;
+    const k = e.strength / 100;
+    const third = d / 3;
+    const win = (x: number, y: number) => `enable='between(t,${f3(x)},${f3(y)})'`;
+    if (e.type === "flash") {
+      [0.9, 0.55, 0.22].forEach((al, n) => {
+        out.push(`drawbox=x=0:y=0:w=iw:h=ih:color=white@${f3(Math.min(1, al * (0.4 + 0.6 * k)))}:t=fill:${win(a + n * third, a + (n + 1) * third)}`);
+      });
+    }
+    if (e.type === "blur") {
+      const sg = 4 + 24 * k;
+      [0.5, 1, 0.5].forEach((m, n) => out.push(`gblur=sigma=${f3(sg * m)}:${win(a + n * third, a + (n + 1) * third)}`));
+    }
+    if (e.type === "rgb") {
+      const c = Math.round(4 + 26 * k);
+      out.push(`chromashift=crh=-${c}:cbh=${c}:${win(a, a + d)}`);
+    }
+    if (e.type === "glitch") {
+      [[44, 420], [26, 200], [12, 60]].forEach(([w, h], n) => {
+        const c = Math.round((20 - n * 7) * (0.4 + 0.6 * k));
+        out.push(`pixelize=w=${w}:h=${h}:${win(a + n * third, a + (n + 1) * third)}`);
+        out.push(`chromashift=crh=-${c}:cbh=${c}:${win(a + n * third, a + (n + 1) * third)}`);
+      });
+    }
+  }
+  return out.join(",");
+}
+
+/**
  * Build the ffmpeg filter graph. Mirrors layerAt() in timeline.ts:
  * each clip's transition-in plays over its first transitionMs on top of the
  * previous clip, which keeps rolling underneath until the transition ends.
@@ -214,6 +278,11 @@ export function buildFilterGraph(project: Project, hasCaptions: boolean, audioIn
   });
 
   let last = `b${placed.length}`;
+  const fxChain = buildEffectsChain(project.effects, W, H);
+  if (fxChain) {
+    parts.push(`[${last}]${fxChain}[fx]`);
+    last = "fx";
+  }
   const lookChain = buildLookChain(project.look);
   if (lookChain) {
     parts.push(`[${last}]${lookChain}[lk]`);

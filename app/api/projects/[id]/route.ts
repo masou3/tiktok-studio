@@ -79,6 +79,7 @@ export async function PATCH(req: Request, { params }: Ctx) {
     ...(Array.isArray(body.captions) ? { captions: body.captions } : {}),
     ...(["tiktok", "bold", "box", "karaoke", "neon"].includes(body.captionStyle) ? { captionStyle: body.captionStyle } : {}),
     ...(body.look && typeof body.look === "object" ? { look: body.look } : {}),
+    ...(Array.isArray(body.effects) ? { effects: body.effects } : {}),
   });
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(project);

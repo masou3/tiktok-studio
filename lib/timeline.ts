@@ -1,4 +1,4 @@
-import type { Caption, CaptionWord, Clip } from "./types";
+import type { Caption, CaptionWord, Clip, Effect } from "./types";
 
 export type PlacedClip = { clip: Clip; index: number; startMs: number; endMs: number };
 
@@ -131,4 +131,40 @@ export function wordsFromScript(script: string, audioMs: number): CaptionWord[] 
     t += len;
     return w;
   });
+}
+
+/** What the timeline effects do to the picture at time t (the preview twin of buildEffectsChain). */
+export function effectState(effects: Effect[], t: number): { transform: string; filter: string; flash: number } {
+  let zoom = 0;
+  let dx = 0;
+  let dy = 0;
+  let flash = 0;
+  const filters: string[] = [];
+  for (const e of effects) {
+    if (t < e.startMs || t >= e.startMs + e.durationMs) continue;
+    const p = (t - e.startMs) / e.durationMs;
+    const k = e.strength / 100;
+    // The phone preview is 252px wide for a 1080px video.
+    if (e.type === "push") zoom += (0.05 + 0.3 * k) * p;
+    if (e.type === "pull") zoom += (0.05 + 0.3 * k) * (1 - p);
+    if (e.type === "shake") {
+      zoom += 0.1;
+      const amp = (6 + 36 * k) * (252 / 1080);
+      dx += amp * Math.sin((t / 1000) * 61);
+      dy += amp * 0.8 * Math.cos((t / 1000) * 53);
+    }
+    if (e.type === "flash") flash = Math.max(flash, Math.pow(1 - p, 2) * (0.4 + 0.6 * k));
+    if (e.type === "blur") filters.push(`blur(${((4 + 24 * k) * (252 / 1080) * (1 - Math.abs(p - 0.5) * 1)).toFixed(1)}px)`);
+    if (e.type === "rgb") filters.push(`drop-shadow(${((4 + 26 * k) * (252 / 1080)).toFixed(1)}px 0 0 rgba(255,0,0,0.55)) drop-shadow(-${((4 + 26 * k) * (252 / 1080)).toFixed(1)}px 0 0 rgba(0,120,255,0.55))`);
+    if (e.type === "glitch") {
+      const j = 1 - p;
+      dx += Math.sin(p * 90) * j * 12 * k;
+      filters.push(`saturate(${(1 + j * 2).toFixed(2)}) hue-rotate(${(j * 70 * k).toFixed(0)}deg)`);
+    }
+  }
+  return {
+    transform: zoom || dx || dy ? `translate(${dx.toFixed(1)}px, ${dy.toFixed(1)}px) scale(${(1 + zoom).toFixed(3)})` : "none",
+    filter: filters.length ? filters.join(" ") : "none",
+    flash,
+  };
 }

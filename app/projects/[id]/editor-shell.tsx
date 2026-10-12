@@ -1,9 +1,10 @@
 "use client";
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import type { Project, Clip, ChatMessage, Caption, CaptionStyle, TransitionType, CaptionWord, LibraryClip, Look } from "@/lib/types";
+import type { Project, Clip, ChatMessage, Caption, CaptionStyle, TransitionType, CaptionWord, LibraryClip, Look, Effect, EffectType } from "@/lib/types";
 import { TRANSITIONS, LOOK_PRESETS } from "@/lib/types";
-import { layoutClips, clipsTotalMs, fmtTime, buildCaptions, captionAt, layerAt, wordsFromScript } from "@/lib/timeline";
+import { EFFECTS as FX_LIST } from "@/lib/types";
+import { layoutClips, clipsTotalMs, fmtTime, buildCaptions, captionAt, layerAt, wordsFromScript, effectState } from "@/lib/timeline";
 
 type PexelsVideo = {
   id: number;
@@ -78,6 +79,9 @@ export default function EditorShell({ project: initial }: { project: Project }) 
   const [openJoin, setOpenJoin] = useState<string | null>(null);
   const dragClipId = useRef<string | null>(null);
   const dragTransition = useRef<TransitionType | null>(null);
+  const dragEffect = useRef<EffectType | null>(null);
+  const [selectedEffectId, setSelectedEffectId] = useState<string | null>(null);
+  const fxRef = useRef<Effect[]>([]);
 
   // Claude + voiceover
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -795,6 +799,72 @@ export default function EditorShell({ project: initial }: { project: Project }) 
     return 0;
   })();
 
+  fxRef.current = project.effects;
+  const fxNow = effectState(project.effects, timeMs);
+  const selectedEffect = project.effects.find((e) => e.id === selectedEffectId) ?? null;
+
+  function saveEffects(next: Effect[]) {
+    fxRef.current = next;
+    setProject((p) => ({ ...p, effects: next }));
+    patch({ effects: next });
+  }
+
+  function dropEffect(e: React.DragEvent) {
+    const type = dragEffect.current ?? (e.dataTransfer.getData("text/effect") as EffectType);
+    dragEffect.current = null;
+    const def = FX_LIST.find((x) => x.id === type);
+    const rect = tracksRef.current?.getBoundingClientRect();
+    if (!def || !rect || !totalMs) return;
+    e.preventDefault();
+    const at = Math.round(((e.clientX - rect.left) / rect.width) * totalMs / 50) * 50;
+    const dur = Math.min(def.defaultMs, totalMs);
+    const startMs = Math.max(0, Math.min(totalMs - dur, at - Math.round(dur / 2)));
+    const fx: Effect = { id: `fx_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, type, startMs, durationMs: dur, strength: 60 };
+    saveEffects([...fxRef.current, fx]);
+    setSelectedEffectId(fx.id);
+    setSelectedClipId(null);
+    setSelectedCaptionId(null);
+  }
+
+  /** Move an effect block (mode "move") or pull one of its edges. */
+  function startEffectDrag(ev: React.MouseEvent, fx: Effect, mode: "move" | "left" | "right") {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const width = tracksRef.current?.getBoundingClientRect().width ?? 0;
+    if (!width || !totalMs) return;
+    setSelectedEffectId(fx.id);
+    setSelectedClipId(null);
+    setSelectedCaptionId(null);
+    const startX = ev.clientX;
+    const msPerPx = totalMs / width;
+    const o = { s: fx.startMs, d: fx.durationMs };
+    const snap = (n: number) => Math.round(n / 50) * 50;
+    let moved = false;
+    const apply = (ev2: MouseEvent) => {
+      moved = true;
+      const dMs = (ev2.clientX - startX) * msPerPx;
+      let s0 = o.s;
+      let d0 = o.d;
+      if (mode === "move") s0 = Math.max(0, Math.min(totalMs - o.d, snap(o.s + dMs)));
+      if (mode === "left") {
+        const end = o.s + o.d;
+        s0 = Math.max(0, Math.min(end - 100, snap(o.s + dMs)));
+        d0 = end - s0;
+      }
+      if (mode === "right") d0 = Math.max(100, Math.min(totalMs - o.s, snap(o.d + dMs)));
+      const next = fxRef.current.map((x) => (x.id === fx.id ? { ...x, startMs: s0, durationMs: d0 } : x));
+      fxRef.current = next;
+      setProject((p) => ({ ...p, effects: next }));
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", apply);
+      window.removeEventListener("mouseup", up);
+      if (moved) patch({ effects: fxRef.current });
+    };
+    window.addEventListener("mousemove", apply);
+    window.addEventListener("mouseup", up);
+  }
+
   function setLook(next: Partial<Look>, save = false) {
     const look = { ...project.look, ...next };
     setProject((p) => ({ ...p, look }));
@@ -1057,6 +1127,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
               </button>
             </div>
             <div onClick={togglePlay} style={{ position: "relative", width: 252, height: 448, background: "#111", borderRadius: 16, overflow: "hidden", boxShadow: "0 0 0 1px var(--border)", cursor: totalMs ? "pointer" : "default" }}>
+              <div style={{ position: "absolute", inset: 0, transform: fxNow.transform, filter: fxNow.filter, transformOrigin: "center" }}>
               {placed.map((p, i) => {
                 const st = layerAt(placed, i, timeMs);
                 return (
@@ -1085,6 +1156,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
                   )
                 );
               })}
+              </div>
               {!placed.length && (
                 <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
                   <span className="muted" style={{ fontSize: 13 }}>No clips yet</span>
@@ -1099,8 +1171,8 @@ export default function EditorShell({ project: initial }: { project: Project }) 
               {project.look.grain > 0 && (
                 <div style={{ position: "absolute", inset: 0, zIndex: 92, pointerEvents: "none", opacity: (project.look.grain / 100) * 0.35, mixBlendMode: "overlay", backgroundImage: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='120' height='120' filter='url(%23n)'/></svg>\")" }} />
               )}
-              {flashOpacity > 0 && (
-                <div style={{ position: "absolute", inset: 0, zIndex: 95, pointerEvents: "none", background: "#fff", opacity: flashOpacity }} />
+              {Math.max(flashOpacity, fxNow.flash) > 0 && (
+                <div style={{ position: "absolute", inset: 0, zIndex: 95, pointerEvents: "none", background: "#fff", opacity: Math.max(flashOpacity, fxNow.flash) }} />
               )}
               {currentCaption && (
                 <div style={{ position: "absolute", left: 14, right: 14, bottom: "27%", textAlign: "center", zIndex: 100, pointerEvents: "none" }}>
@@ -1276,7 +1348,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
         </div>
 
         {/* ---------------- timeline ---------------- */}
-        <div style={{ height: 296, flexShrink: 0, borderTop: "1px solid var(--border)", background: "var(--panel)", display: "flex", flexDirection: "column" }}>
+        <div style={{ height: 348, flexShrink: 0, borderTop: "1px solid var(--border)", background: "var(--panel)", display: "flex", flexDirection: "column" }}>
           <div className="row" style={{ height: 42, flexShrink: 0, padding: "0 12px", borderBottom: "1px solid var(--border)", gap: 10 }}>
             <button onClick={togglePlay} disabled={!totalMs} aria-label={playing ? "Pause" : "Play"} style={{ background: "#e8e8ea", border: 0, color: "#121214", borderRadius: 6, padding: "5px 14px", fontWeight: 600, cursor: totalMs ? "pointer" : "default", opacity: totalMs ? 1 : 0.5 }}>
               {playing ? "Pause" : "Play"}
@@ -1293,10 +1365,26 @@ export default function EditorShell({ project: initial }: { project: Project }) 
             ))}
           </div>
 
+          <div className="row" style={{ height: 38, flexShrink: 0, padding: "0 12px", borderBottom: "1px solid var(--border)", gap: 8 }}>
+            <span className="muted" style={{ fontSize: 11 }}>Effects: drag onto the Effects lane</span>
+            {FX_LIST.map((x) => (
+              <div key={x.id} draggable onDragStart={(e) => { dragEffect.current = x.id; dragTransition.current = null; dragClipId.current = null; e.dataTransfer.setData("text/effect", x.id); e.dataTransfer.effectAllowed = "copy"; }} onDragEnd={() => (dragEffect.current = null)} style={chip}>{x.label}</div>
+            ))}
+            <div style={{ flex: 1 }} />
+            {selectedEffect && (
+              <>
+                <span style={{ fontSize: 11, color: "#c4c4cc" }}>{FX_LIST.find((x) => x.id === selectedEffect.type)?.label} · {(selectedEffect.durationMs / 1000).toFixed(2)}s · Strength</span>
+                <input type="range" min={10} max={100} step={5} value={selectedEffect.strength} onChange={(e) => { const v = Number(e.target.value); const next = fxRef.current.map((x) => (x.id === selectedEffect.id ? { ...x, strength: v } : x)); fxRef.current = next; setProject((p) => ({ ...p, effects: next })); }} onMouseUp={() => patch({ effects: fxRef.current })} onTouchEnd={() => patch({ effects: fxRef.current })} onKeyUp={() => patch({ effects: fxRef.current })} style={{ width: 110, padding: 0, accentColor: "var(--accent)" }} />
+                <button onClick={() => { saveEffects(fxRef.current.filter((x) => x.id !== selectedEffect.id)); setSelectedEffectId(null); }} style={{ ...chip, cursor: "pointer", border: "1px solid var(--border)", background: "transparent" }}>Remove</button>
+              </>
+            )}
+          </div>
+
           <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
             <div style={{ width: 84, flexShrink: 0, borderRight: "1px solid var(--border)", fontSize: 11, color: "#c4c4cc" }}>
               <div style={{ height: 24 }} />
               <div style={{ height: 64, display: "flex", alignItems: "center", padding: "0 10px", borderTop: "1px solid var(--border)" }}>Video</div>
+              <div style={{ height: 44, display: "flex", alignItems: "center", padding: "0 10px", borderTop: "1px solid var(--border)" }}>Effects</div>
               <div style={{ height: 44, display: "flex", alignItems: "center", padding: "0 10px", borderTop: "1px solid var(--border)" }}>Captions</div>
               <div style={{ height: 44, display: "flex", alignItems: "center", padding: "0 10px", borderTop: "1px solid var(--border)" }}>Voice</div>
               <div style={{ height: 44, display: "flex", alignItems: "center", padding: "0 10px", borderTop: "1px solid var(--border)" }}>Music</div>
@@ -1381,6 +1469,34 @@ export default function EditorShell({ project: initial }: { project: Project }) 
                           ))}
                         </div>
                       )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* effects lane */}
+              <div
+                onMouseDown={(e) => { if (e.target !== e.currentTarget) return; seekFromEvent(e); setSelectedEffectId(null); }}
+                onDragOver={(e) => { if (dragEffect.current) e.preventDefault(); }}
+                onDrop={dropEffect}
+                style={{ height: 44, position: "relative", borderTop: "1px solid var(--border)" }}
+              >
+                {!project.effects.length && (
+                  <span className="muted" style={{ position: "absolute", left: 4, top: 14, fontSize: 11, pointerEvents: "none" }}>Drop an effect here</span>
+                )}
+                {project.effects.map((x) => {
+                  const sel = x.id === selectedEffectId;
+                  const label = FX_LIST.find((f) => f.id === x.type)?.label ?? x.type;
+                  return (
+                    <div
+                      key={x.id}
+                      onMouseDown={(e) => startEffectDrag(e, x, "move")}
+                      title={`${label}: drag to move, pull the edges to change the length`}
+                      style={{ position: "absolute", left: `${pct(x.startMs)}%`, width: `calc(${pct(x.durationMs)}% - 2px)`, top: 6, bottom: 6, background: "linear-gradient(90deg,#7a3ea8,#a8437a)", borderRadius: 5, boxShadow: sel ? "0 0 0 2px var(--accent)" : "0 0 0 1px var(--border)", cursor: "grab", overflow: "hidden", fontSize: 10, color: "#fff", display: "flex", alignItems: "center", padding: "0 10px", whiteSpace: "nowrap", userSelect: "none" }}
+                    >
+                      {label}
+                      <div onMouseDown={(e) => startEffectDrag(e, x, "left")} style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 8, cursor: "ew-resize", background: "rgba(255,255,255,0.35)" }} />
+                      <div onMouseDown={(e) => startEffectDrag(e, x, "right")} style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: 8, cursor: "ew-resize", background: "rgba(255,255,255,0.35)" }} />
                     </div>
                   );
                 })}
