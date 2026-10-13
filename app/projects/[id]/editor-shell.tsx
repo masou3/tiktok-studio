@@ -30,7 +30,7 @@ type FalJob = {
 
 const DEFAULT_CLIP_MS = 5000;
 const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
-const transitionShort: Record<TransitionType, string> = { cut: "+", crossfade: "Fade", slide: "Slide", zoom: "Zoom", flash: "Flash", whip: "Whip", spin: "Spin", glitch: "Glitch" };
+const transitionShort: Record<TransitionType, string> = { cut: "+", crossfade: "Fade", slide: "Slide", zoom: "Zoom", flash: "Flash", whip: "Whip", spin: "Spin", glitch: "Glitch", slideL: "Slide \u2190", slideU: "Slide \u2191", slideD: "Slide \u2193", whipL: "Whip \u2190", whipU: "Whip \u2191", whipD: "Whip \u2193", burn: "Burn" };
 
 function loadJobs(projectId: string): FalJob[] {
   try {

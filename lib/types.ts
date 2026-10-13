@@ -1,4 +1,4 @@
-export type TransitionType = "cut" | "crossfade" | "slide" | "zoom" | "flash" | "whip" | "spin" | "glitch";
+export type TransitionType = "cut" | "crossfade" | "slide" | "zoom" | "flash" | "whip" | "spin" | "glitch" | "slideL" | "slideU" | "slideD" | "whipL" | "whipU" | "whipD" | "burn";
 
 export const TRANSITIONS: { id: TransitionType; label: string }[] = [
   { id: "cut", label: "Cut" },
@@ -9,6 +9,13 @@ export const TRANSITIONS: { id: TransitionType; label: string }[] = [
   { id: "whip", label: "Whip blur" },
   { id: "spin", label: "Spin zoom" },
   { id: "glitch", label: "Glitch" },
+  { id: "slideL", label: "Slide left" },
+  { id: "slideU", label: "Slide up" },
+  { id: "slideD", label: "Slide down" },
+  { id: "whipL", label: "Whip left" },
+  { id: "whipU", label: "Whip up" },
+  { id: "whipD", label: "Whip down" },
+  { id: "burn", label: "Film burn" },
 ];
 
 /** "image" is a still (like a brand end card) held for the clip length. */

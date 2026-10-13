@@ -237,7 +237,7 @@ export async function trimClip(
   return rowToClip(Array.isArray(rows) ? rows[0] : rows);
 }
 
-const TRANSITION_IDS: TransitionType[] = ["cut", "crossfade", "slide", "zoom", "flash", "whip", "spin", "glitch"];
+const TRANSITION_IDS: TransitionType[] = ["cut", "crossfade", "slide", "zoom", "flash", "whip", "spin", "glitch", "slideL", "slideU", "slideD", "whipL", "whipU", "whipD", "burn"];
 
 export async function updateClip(
   clipId: string,

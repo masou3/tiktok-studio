@@ -104,8 +104,16 @@ export function transitionPost(kind: string, S: number, T: number): string {
   const f3 = (n: number) => n.toFixed(3);
   const win = (a: number, b: number) => `enable='between(t,${f3(a)},${f3(b)})'`;
   const third = T / 3;
-  if (kind === "whip") {
-    return [90, 45, 14].map((r, n) => `dblur=angle=0:radius=${r}:${win(S + n * third, S + (n + 1) * third)}`).join(",");
+  if (kind === "whip" || kind === "whipL" || kind === "whipU" || kind === "whipD") {
+    const ang = kind === "whipU" || kind === "whipD" ? 90 : 0;
+    return [90, 45, 14].map((r, n) => `dblur=angle=${ang}:radius=${r}:${win(S + n * third, S + (n + 1) * third)}`).join(",");
+  }
+  if (kind === "burn") {
+    // Warm film-burn dissolve: the frame blooms orange, softens, then settles.
+    const steps: [number, number, number][] = [[S - 0.12, S, 0.55], [S, S + third, 1], [S + third, S + 2 * third, 0.55], [S + 2 * third, S + T, 0.2]];
+    return steps.map(([a, b, k]) =>
+      `lutyuv=y='clip(val*${(1 + 0.18 * k).toFixed(3)}+${Math.round(14 * k)},0,255)':u='val-${Math.round(14 * k)}':v='val+${Math.round(18 * k)}':${win(a, b)},gblur=sigma=${(7 * k).toFixed(2)}:${win(a, b)}`,
+    ).join(",");
   }
   if (kind === "spin") {
     return [16, 8, 3].map((sg, n) => `gblur=sigma=${sg}:${win(S + n * third, S + (n + 1) * third)}`).join(",");
@@ -253,8 +261,22 @@ export function buildFilterGraph(project: Project, hasCaptions: boolean, audioIn
       chain += `,format=yuva420p,fade=t=in:st=${S.toFixed(3)}:d=${T.toFixed(3)}:alpha=1`;
     } else if (kind === "slide") {
       x = `W*pow(1-${prog},3)`;
+    } else if (kind === "slideL") {
+      x = `-W*pow(1-${prog},3)`;
+    } else if (kind === "slideU") {
+      y = `H*pow(1-${prog},3)`;
+    } else if (kind === "slideD") {
+      y = `-H*pow(1-${prog},3)`;
     } else if (kind === "whip") {
       x = `W*pow(1-${prog},3)`;
+    } else if (kind === "whipL") {
+      x = `-W*pow(1-${prog},3)`;
+    } else if (kind === "whipU") {
+      y = `H*pow(1-${prog},3)`;
+    } else if (kind === "whipD") {
+      y = `-H*pow(1-${prog},3)`;
+    } else if (kind === "burn") {
+      chain += `,format=yuva420p,fade=t=in:st=${S.toFixed(3)}:d=${T.toFixed(3)}:alpha=1`;
     } else if (kind === "spin") {
       // Zoomed-in and rotated, settling flat. Rotate on a fixed-size frame (crop after the zoom).
       const k = `clip((t-${S.toFixed(3)})/${T.toFixed(3)},0,1)`;

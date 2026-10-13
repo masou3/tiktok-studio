@@ -84,10 +84,22 @@ export function layerAt(placed: PlacedClip[], i: number, t: number): LayerState 
   if (i > 0 && p.clip.transitionIn !== "cut" && t >= p.startMs && t < p.startMs + T) {
     const k = easeOut((t - p.startMs) / T);
     if (p.clip.transitionIn === "crossfade") opacity = k;
-    if (p.clip.transitionIn === "slide") transform = `translateX(${(1 - k) * 100}%)`;
-    if (p.clip.transitionIn === "whip") {
-      transform = `translateX(${(1 - k) * 100}%)`;
-      filter = `blur(${((1 - k) * 7).toFixed(1)}px)`;
+    const ti = p.clip.transitionIn;
+    if (ti === "slide") transform = `translateX(${(1 - k) * 100}%)`;
+    if (ti === "slideL") transform = `translateX(${-(1 - k) * 100}%)`;
+    if (ti === "slideU") transform = `translateY(${(1 - k) * 100}%)`;
+    if (ti === "slideD") transform = `translateY(${-(1 - k) * 100}%)`;
+    if (ti === "whip" || ti === "whipL" || ti === "whipU" || ti === "whipD") {
+      const b = ((1 - k) * 7).toFixed(1);
+      if (ti === "whipU") transform = `translateY(${(1 - k) * 100}%)`;
+      else if (ti === "whipD") transform = `translateY(${-(1 - k) * 100}%)`;
+      else transform = `translateX(${(ti === "whipL" ? -1 : 1) * (1 - k) * 100}%)`;
+      filter = `blur(${b}px)`;
+    }
+    if (ti === "burn") {
+      const j = 1 - k;
+      opacity = Math.min(1, k * 1.6);
+      filter = `brightness(${(1 + 0.6 * j).toFixed(2)}) sepia(${(j * 0.9).toFixed(2)}) saturate(${(1 + j * 1.5).toFixed(2)}) blur(${(j * 4).toFixed(1)}px)`;
     }
     if (p.clip.transitionIn === "spin") {
       transform = `rotate(${(-(1 - k) * 28).toFixed(1)}deg) scale(${1 + 0.6 * (1 - k)})`;
