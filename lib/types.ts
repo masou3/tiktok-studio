@@ -81,6 +81,61 @@ export function cleanLook(v: unknown): Look {
   return { grain: n(o.grain), scanlines: n(o.scanlines), vignette: n(o.vignette), rgb: n(o.rgb) };
 }
 
+/** A timed item dropped onto the effects lane, like a CapCut effect or filter. */
+export type EffectType =
+  | "push" | "pull" | "shake" | "flash" | "glitch" | "blur" | "rgb"
+  | "vhs" | "camcorder" | "oldfilm" | "halation" | "lightleak" | "dream"
+  | "cold" | "warm" | "bw" | "night";
+
+export const EFFECTS: { id: EffectType; label: string; defaultMs: number; group: "motion" | "filter" }[] = [
+  { id: "push", label: "Push in", defaultMs: 1200, group: "motion" },
+  { id: "pull", label: "Pull out", defaultMs: 1200, group: "motion" },
+  { id: "shake", label: "Shake", defaultMs: 700, group: "motion" },
+  { id: "flash", label: "Flash", defaultMs: 350, group: "motion" },
+  { id: "glitch", label: "Glitch", defaultMs: 400, group: "motion" },
+  { id: "blur", label: "Blur pulse", defaultMs: 600, group: "motion" },
+  { id: "rgb", label: "RGB split", defaultMs: 500, group: "motion" },
+  { id: "vhs", label: "VHS tape", defaultMs: 2500, group: "filter" },
+  { id: "camcorder", label: "Camcorder", defaultMs: 2500, group: "filter" },
+  { id: "oldfilm", label: "Old film", defaultMs: 2500, group: "filter" },
+  { id: "halation", label: "Red glow", defaultMs: 2500, group: "filter" },
+  { id: "lightleak", label: "Light leak", defaultMs: 2000, group: "filter" },
+  { id: "dream", label: "Dreamy glow", defaultMs: 2500, group: "filter" },
+  { id: "cold", label: "Cold teal", defaultMs: 3000, group: "filter" },
+  { id: "warm", label: "Warm", defaultMs: 3000, group: "filter" },
+  { id: "bw", label: "Black and white", defaultMs: 3000, group: "filter" },
+  { id: "night", label: "Night blue", defaultMs: 3000, group: "filter" },
+];
+
+export type Effect = {
+  id: string;
+  type: EffectType;
+  startMs: number;
+  durationMs: number;
+  /** 10 (gentle) to 100 (hard) */
+  strength: number;
+};
+
+const EFFECT_IDS = EFFECTS.map((e) => e.id as string);
+
+export function cleanEffects(v: unknown): Effect[] {
+  if (!Array.isArray(v)) return [];
+  const out: Effect[] = [];
+  for (const raw of v.slice(0, 80)) {
+    const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    if (typeof o.type !== "string" || !EFFECT_IDS.includes(o.type)) continue;
+    const num = (x: unknown, d: number) => (typeof x === "number" && isFinite(x) ? x : d);
+    out.push({
+      id: typeof o.id === "string" && o.id ? o.id.slice(0, 40) : `fx_${out.length}_${Math.random().toString(36).slice(2, 8)}`,
+      type: o.type as EffectType,
+      startMs: Math.max(0, Math.round(num(o.startMs, 0))),
+      durationMs: Math.min(60000, Math.max(100, Math.round(num(o.durationMs, 500)))),
+      strength: Math.min(100, Math.max(10, Math.round(num(o.strength, 60)))),
+    });
+  }
+  return out;
+}
+
 export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
@@ -109,6 +164,7 @@ export type Project = {
   captions: Caption[];
   captionStyle: CaptionStyle;
   look: Look;
+  effects: Effect[];
   budgetCents: number;
   spentCents: number;
   createdAt: string;

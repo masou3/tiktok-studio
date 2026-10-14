@@ -217,6 +217,54 @@ export function buildEffectsChain(effects: Effect[] | undefined, W: number, H: n
       const c = Math.round(4 + 26 * k);
       out.push(`chromashift=crh=-${c}:cbh=${c}:${win(a, a + d)}`);
     }
+    // ---- Look filters that fit in the single chain (colour grades, VHS, camcorder, old film) ----
+    const W0 = win(a, a + d);
+    if (e.type === "cold") {
+      out.push(`colorbalance=rs=${f3(-0.1 * k)}:bs=${f3(0.18 * k)}:rm=${f3(-0.08 * k)}:bm=${f3(0.12 * k)}:${W0}`);
+      out.push(`eq=saturation=${f3(1 - 0.35 * k)}:contrast=${f3(1 + 0.12 * k)}:${W0}`);
+    }
+    if (e.type === "warm") {
+      out.push(`colorbalance=rs=${f3(0.12 * k)}:bs=${f3(-0.12 * k)}:rm=${f3(0.08 * k)}:bm=${f3(-0.1 * k)}:${W0}`);
+      out.push(`eq=saturation=${f3(1 - 0.1 * k)}:contrast=${f3(1 + 0.1 * k)}:${W0}`);
+    }
+    if (e.type === "bw") {
+      out.push(`hue=s=${f3(Math.max(0, 0.5 - k * 0.5))}:${W0}`);
+      out.push(`eq=contrast=${f3(1 + 0.3 * k)}:${W0}`);
+    }
+    if (e.type === "night") {
+      out.push(`colorbalance=rs=${f3(-0.15 * k)}:bs=${f3(0.2 * k)}:${W0}`);
+      out.push(`eq=brightness=${f3(-0.12 * k)}:saturation=${f3(1 - 0.4 * k)}:contrast=1.1:${W0}`);
+    }
+    if (e.type === "vhs") {
+      const px = Math.max(2, Math.round(2 + 5 * k));
+      out.push(`rgbashift=rh=-${px}:bh=${px}:edge=smear:${W0}`);
+      out.push(`gblur=sigma=${f3(0.8 + 0.8 * k)}:${W0}`);
+      out.push(`eq=saturation=0.85:contrast=1.05:${W0}`);
+      out.push(`noise=alls=${Math.round(14 + 14 * k)}:allf=t:${W0}`);
+      out.push(`drawgrid=w=0:h=4:t=1:c=black@${f3(0.12 + 0.12 * k)}:${W0}`);
+      out.push(`drawtext=fontfile=fonts/Poppins-Bold.ttf:text='PLAY':x=60:y=110:fontsize=46:fontcolor=white@0.92:borderw=3:bordercolor=black:${W0}`);
+    }
+    if (e.type === "camcorder") {
+      out.push(`eq=saturation=0.75:contrast=${f3(1 + 0.1 * k)}:${W0}`);
+      out.push(`noise=alls=10:allf=t:${W0}`);
+      const blink = `enable='between(t,${f3(a)},${f3(a + d)})*lt(mod(t,1.2),0.7)'`;
+      out.push(`drawbox=x=60:y=112:w=30:h=30:color=red@0.95:t=fill:${blink}`);
+      out.push(`drawtext=fontfile=fonts/Poppins-Bold.ttf:text='REC':x=108:y=104:fontsize=44:fontcolor=white:borderw=3:bordercolor=black:${W0}`);
+      const m = 50, L = 70, T = 4;
+      const corners: [number, number, number, number][] = [
+        [m, m, L, T], [m, m, T, L],
+        [W - m - L, m, L, T], [W - m - T, m, T, L],
+        [m, H - m - T, L, T], [m, H - m - L, T, L],
+        [W - m - L, H - m - T, L, T], [W - m - T, H - m - L, T, L],
+      ];
+      for (const [cx, cy, cw, ch] of corners) out.push(`drawbox=x=${cx}:y=${cy}:w=${cw}:h=${ch}:color=white@0.9:t=fill:${W0}`);
+    }
+    if (e.type === "oldfilm") {
+      out.push(`hue=s=${f3(0.35 - 0.2 * k)}:${W0}`);
+      out.push(`colorbalance=rs=${f3(0.08 * k)}:bs=${f3(-0.06 * k)}:${W0}`);
+      out.push(`eq=contrast=${f3(1.05 + 0.2 * k)}:brightness='between(t,${f3(a)},${f3(a + d)})*0.03*sin(t*53)':eval=frame`);
+      out.push(`noise=alls=${Math.round(14 + 12 * k)}:allf=t:${W0}`);
+    }
     if (e.type === "glitch") {
       [[44, 420], [26, 200], [12, 60]].forEach(([w, h], n) => {
         const c = Math.round((20 - n * 7) * (0.4 + 0.6 * k));
@@ -226,6 +274,54 @@ export function buildEffectsChain(effects: Effect[] | undefined, W: number, H: n
     }
   }
   return out.join(",");
+}
+
+/**
+ * Look filters that need a second input (moving bands, glows, leaks). They are
+ * chained as graph stages: each reads `inLabel` and the last label is returned.
+ * VHS tracking bands and old-film scratches move with the clock; red glow and
+ * dreamy glow blend a blurred copy back over the picture; the light leak
+ * blends a slowly drifting colour gradient in.
+ */
+export function buildFilterStages(effects: Effect[] | undefined, W: number, H: number, inLabel: string): { parts: string[]; out: string } {
+  const parts: string[] = [];
+  let cur = inLabel;
+  let n = 0;
+  const f3 = (x: number) => x.toFixed(3);
+  for (const e of effects || []) {
+    const a = e.startMs / 1000;
+    const b = a + e.durationMs / 1000;
+    const k = e.strength / 100;
+    const win = `enable='between(t,${f3(a)},${f3(b)})'`;
+    const id = n++;
+    const next = `fs${id}`;
+    if (e.type === "vhs") {
+      const h1 = Math.round(14 + 22 * k);
+      parts.push(`color=c=white@${f3(0.1 + 0.12 * k)}:s=${W}x${h1}:r=${FPS},format=rgba[fb${id}]`);
+      parts.push(`[${cur}][fb${id}]overlay=x=0:y='mod(t*430,H-60)':shortest=1:${win}[${next}]`);
+      cur = next;
+    } else if (e.type === "oldfilm") {
+      parts.push(`color=c=white@${f3(0.2 + 0.15 * k)}:s=2x${H},format=rgba[fb${id}]`);
+      parts.push(`[${cur}][fb${id}]overlay=x='mod(t*733,W)':y=0:shortest=1:${win}[${next}]`);
+      cur = next;
+    } else if (e.type === "halation") {
+      parts.push(`[${cur}]split[ha${id}][hb${id}]`);
+      parts.push(`[hb${id}]lutyuv=y='clip((val-140)*3,0,255)',gblur=sigma=${f3(16 + 10 * k)},colorchannelmixer=rr=1:gg=0.2:bb=0.15[hg${id}]`);
+      parts.push(`[ha${id}][hg${id}]blend=all_mode=screen:all_opacity=${f3(0.35 + 0.6 * k)}:${win}[${next}]`);
+      cur = next;
+    } else if (e.type === "dream") {
+      parts.push(`[${cur}]split[da${id}][db${id}]`);
+      parts.push(`[db${id}]gblur=sigma=${f3(10 + 8 * k)}[dg${id}]`);
+      parts.push(`[da${id}][dg${id}]blend=all_mode=screen:all_opacity=${f3(0.3 + 0.35 * k)}:${win}[dm${id}]`);
+      parts.push(`[dm${id}]eq=brightness=${f3(0.02 + 0.03 * k)}:saturation=${f3(1 + 0.12 * k)}:${win}[${next}]`);
+      cur = next;
+    } else if (e.type === "lightleak") {
+      parts.push(`gradients=s=${W}x${H}:r=${FPS}:c0=0xff8a2a:c1=0x3a0a5a:x0=0:y0=0:x1=${W}:y1=${H}:speed=0.02:nb_colors=2,format=yuv420p[lk${id}]`);
+      parts.push(`[${cur}][lk${id}]blend=all_mode=screen:all_opacity=${f3(0.2 + 0.3 * k)}:shortest=1:${win}[${next}]`);
+      cur = next;
+    }
+  }
+  return { parts, out: cur };
 }
 
 /**
@@ -304,6 +400,11 @@ export function buildFilterGraph(project: Project, hasCaptions: boolean, audioIn
   if (fxChain) {
     parts.push(`[${last}]${fxChain}[fx]`);
     last = "fx";
+  }
+  const stages = buildFilterStages(project.effects, W, H, last);
+  if (stages.parts.length) {
+    parts.push(...stages.parts);
+    last = stages.out;
   }
   const lookChain = buildLookChain(project.look);
   if (lookChain) {

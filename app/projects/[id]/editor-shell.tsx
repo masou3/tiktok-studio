@@ -1171,6 +1171,29 @@ export default function EditorShell({ project: initial }: { project: Project }) 
               {project.look.grain > 0 && (
                 <div style={{ position: "absolute", inset: 0, zIndex: 92, pointerEvents: "none", opacity: (project.look.grain / 100) * 0.35, mixBlendMode: "overlay", backgroundImage: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='120' height='120' filter='url(%23n)'/></svg>\")" }} />
               )}
+              {fxNow.tags.vhs !== undefined && (
+                <>
+                  <div style={{ position: "absolute", inset: 0, zIndex: 93, pointerEvents: "none", background: `repeating-linear-gradient(to bottom, rgba(0,0,0,${0.12 + 0.12 * fxNow.tags.vhs}) 0px, rgba(0,0,0,${0.12 + 0.12 * fxNow.tags.vhs}) 1px, rgba(0,0,0,0) 1px, rgba(0,0,0,0) 3px)` }} />
+                  <div style={{ position: "absolute", left: 0, right: 0, height: 8, top: `${(timeMs / 1000 * 40) % 95}%`, zIndex: 93, pointerEvents: "none", background: `rgba(255,255,255,${0.1 + 0.12 * fxNow.tags.vhs})` }} />
+                  <div style={{ position: "absolute", left: 14, top: 20, zIndex: 93, pointerEvents: "none", color: "#fff", fontSize: 10, fontWeight: 700, textShadow: "0 0 2px #000" }}>PLAY</div>
+                </>
+              )}
+              {fxNow.tags.camcorder !== undefined && (
+                <div style={{ position: "absolute", inset: 10, zIndex: 93, pointerEvents: "none", border: "1px solid rgba(255,255,255,0.35)", color: "#fff", fontSize: 10, fontWeight: 700, textShadow: "0 0 2px #000" }}>
+                  <span style={{ position: "absolute", left: 8, top: 6, display: "flex", alignItems: "center", gap: 4 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: 4, background: Math.floor(timeMs / 600) % 2 === 0 ? "#e22" : "transparent" }} />REC
+                  </span>
+                </div>
+              )}
+              {fxNow.tags.oldfilm !== undefined && (
+                <div style={{ position: "absolute", inset: 0, zIndex: 93, pointerEvents: "none", opacity: 0.28 + 0.2 * fxNow.tags.oldfilm, mixBlendMode: "overlay", backgroundImage: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='120' height='120' filter='url(%23n)'/></svg>\")" }} />
+              )}
+              {fxNow.tags.lightleak !== undefined && (
+                <div style={{ position: "absolute", inset: 0, zIndex: 93, pointerEvents: "none", mixBlendMode: "screen", opacity: 0.35 + 0.4 * fxNow.tags.lightleak, background: `radial-gradient(ellipse at ${30 + 40 * Math.sin(timeMs / 700)}% 15%, rgba(255,138,42,0.9) 0%, rgba(255,60,120,0.35) 40%, rgba(0,0,0,0) 70%)` }} />
+              )}
+              {fxNow.tags.dream !== undefined && (
+                <div style={{ position: "absolute", inset: 0, zIndex: 93, pointerEvents: "none", mixBlendMode: "screen", opacity: 0.18 + 0.2 * fxNow.tags.dream, background: "radial-gradient(ellipse at center, rgba(255,230,240,0.9) 0%, rgba(255,230,240,0) 70%)" }} />
+              )}
               {Math.max(flashOpacity, fxNow.flash) > 0 && (
                 <div style={{ position: "absolute", inset: 0, zIndex: 95, pointerEvents: "none", background: "#fff", opacity: Math.max(flashOpacity, fxNow.flash) }} />
               )}
@@ -1365,9 +1388,16 @@ export default function EditorShell({ project: initial }: { project: Project }) 
             ))}
           </div>
 
+          <div className="row" style={{ height: 38, flexShrink: 0, padding: "0 12px", borderBottom: "1px solid var(--border)", gap: 8, overflowX: "auto" }}>
+            <span className="muted" style={{ fontSize: 11, whiteSpace: "nowrap" }}>Filters: drag onto the Effects lane</span>
+            {FX_LIST.filter((x) => x.group === "filter").map((x) => (
+              <div key={x.id} draggable onDragStart={(e) => { dragEffect.current = x.id; dragTransition.current = null; dragClipId.current = null; e.dataTransfer.setData("text/effect", x.id); e.dataTransfer.effectAllowed = "copy"; }} onDragEnd={() => (dragEffect.current = null)} style={{ ...chip, whiteSpace: "nowrap", borderColor: "#2fa39a" }}>{x.label}</div>
+            ))}
+          </div>
+
           <div className="row" style={{ height: 38, flexShrink: 0, padding: "0 12px", borderBottom: "1px solid var(--border)", gap: 8 }}>
             <span className="muted" style={{ fontSize: 11 }}>Effects: drag onto the Effects lane</span>
-            {FX_LIST.map((x) => (
+            {FX_LIST.filter((x) => x.group === "motion").map((x) => (
               <div key={x.id} draggable onDragStart={(e) => { dragEffect.current = x.id; dragTransition.current = null; dragClipId.current = null; e.dataTransfer.setData("text/effect", x.id); e.dataTransfer.effectAllowed = "copy"; }} onDragEnd={() => (dragEffect.current = null)} style={chip}>{x.label}</div>
             ))}
             <div style={{ flex: 1 }} />
@@ -1492,7 +1522,7 @@ export default function EditorShell({ project: initial }: { project: Project }) 
                       key={x.id}
                       onMouseDown={(e) => startEffectDrag(e, x, "move")}
                       title={`${label}: drag to move, pull the edges to change the length`}
-                      style={{ position: "absolute", left: `${pct(x.startMs)}%`, width: `calc(${pct(x.durationMs)}% - 2px)`, top: 6, bottom: 6, background: "linear-gradient(90deg,#7a3ea8,#a8437a)", borderRadius: 5, boxShadow: sel ? "0 0 0 2px var(--accent)" : "0 0 0 1px var(--border)", cursor: "grab", overflow: "hidden", fontSize: 10, color: "#fff", display: "flex", alignItems: "center", padding: "0 10px", whiteSpace: "nowrap", userSelect: "none" }}
+                      style={{ position: "absolute", left: `${pct(x.startMs)}%`, width: `calc(${pct(x.durationMs)}% - 2px)`, top: 6, bottom: 6, background: FX_LIST.find((f) => f.id === x.type)?.group === "filter" ? "linear-gradient(90deg,#1f6f8b,#2fa39a)" : "linear-gradient(90deg,#7a3ea8,#a8437a)", borderRadius: 5, boxShadow: sel ? "0 0 0 2px var(--accent)" : "0 0 0 1px var(--border)", cursor: "grab", overflow: "hidden", fontSize: 10, color: "#fff", display: "flex", alignItems: "center", padding: "0 10px", whiteSpace: "nowrap", userSelect: "none" }}
                     >
                       {label}
                       <div onMouseDown={(e) => startEffectDrag(e, x, "left")} style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 8, cursor: "ew-resize", background: "rgba(255,255,255,0.35)" }} />

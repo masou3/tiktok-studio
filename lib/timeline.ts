@@ -146,7 +146,8 @@ export function wordsFromScript(script: string, audioMs: number): CaptionWord[] 
 }
 
 /** What the timeline effects do to the picture at time t (the preview twin of buildEffectsChain). */
-export function effectState(effects: Effect[], t: number): { transform: string; filter: string; flash: number } {
+export function effectState(effects: Effect[], t: number): { transform: string; filter: string; flash: number; tags: Record<string, number> } {
+  const tags: Record<string, number> = {};
   let zoom = 0;
   let dx = 0;
   let dy = 0;
@@ -168,6 +169,21 @@ export function effectState(effects: Effect[], t: number): { transform: string; 
     if (e.type === "flash") flash = Math.max(flash, Math.pow(1 - p, 2) * (0.4 + 0.6 * k));
     if (e.type === "blur") filters.push(`blur(${((4 + 24 * k) * (252 / 1080) * (1 - Math.abs(p - 0.5) * 1)).toFixed(1)}px)`);
     if (e.type === "rgb") filters.push(`drop-shadow(${((4 + 26 * k) * (252 / 1080)).toFixed(1)}px 0 0 rgba(255,0,0,0.55)) drop-shadow(-${((4 + 26 * k) * (252 / 1080)).toFixed(1)}px 0 0 rgba(0,120,255,0.55))`);
+    // Look filters. CSS gets the colour grade; the editor draws the overlays (scan lines, REC badge, leak) from tags.
+    if (e.type === "cold") filters.push(`saturate(${(1 - 0.35 * k).toFixed(2)}) hue-rotate(${(8 * k).toFixed(0)}deg) contrast(${(1 + 0.15 * k).toFixed(2)}) brightness(${(1 - 0.05 * k).toFixed(2)})`);
+    if (e.type === "warm") filters.push(`sepia(${(0.35 * k).toFixed(2)}) saturate(${(1 + 0.2 * k).toFixed(2)}) hue-rotate(${(-8 * k).toFixed(0)}deg) contrast(${(1 + 0.12 * k).toFixed(2)})`);
+    if (e.type === "bw") filters.push(`grayscale(${Math.min(1, 0.5 + k).toFixed(2)}) contrast(${(1 + 0.3 * k).toFixed(2)})`);
+    if (e.type === "night") filters.push(`brightness(${(1 - 0.3 * k).toFixed(2)}) saturate(${(1 - 0.4 * k).toFixed(2)}) hue-rotate(${(18 * k).toFixed(0)}deg) contrast(${(1 + 0.1 * k).toFixed(2)})`);
+    if (e.type === "vhs") {
+      const px = ((2 + 5 * k) * (252 / 1080)).toFixed(1);
+      filters.push(`saturate(0.85) contrast(1.05) blur(0.4px) drop-shadow(${px}px 0 0 rgba(255,0,0,0.4)) drop-shadow(-${px}px 0 0 rgba(0,120,255,0.4))`);
+      tags.vhs = k;
+    }
+    if (e.type === "camcorder") { filters.push(`saturate(0.75) contrast(${(1 + 0.12 * k).toFixed(2)})`); tags.camcorder = k; }
+    if (e.type === "oldfilm") { filters.push(`grayscale(0.85) sepia(0.25) contrast(${(1 + 0.2 * k).toFixed(2)}) brightness(${(0.96 + 0.06 * Math.sin(t / 30)).toFixed(2)})`); tags.oldfilm = k; }
+    if (e.type === "halation") filters.push(`brightness(1.04) drop-shadow(0 0 ${(6 + 10 * k).toFixed(0)}px rgba(255,60,40,${(0.35 + 0.4 * k).toFixed(2)}))`);
+    if (e.type === "lightleak") tags.lightleak = k;
+    if (e.type === "dream") { filters.push(`blur(${(0.5 + 0.8 * k).toFixed(1)}px) brightness(${(1.04 + 0.08 * k).toFixed(2)}) saturate(${(1 + 0.15 * k).toFixed(2)})`); tags.dream = k; }
     if (e.type === "glitch") {
       const j = 1 - p;
       dx += Math.sin(p * 90) * j * 12 * k;
@@ -178,5 +194,6 @@ export function effectState(effects: Effect[], t: number): { transform: string; 
     transform: zoom || dx || dy ? `translate(${dx.toFixed(1)}px, ${dy.toFixed(1)}px) scale(${(1 + zoom).toFixed(3)})` : "none",
     filter: filters.length ? filters.join(" ") : "none",
     flash,
+    tags,
   };
 }

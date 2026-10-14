@@ -2,7 +2,7 @@
 // Set SUPABASE_URL and SUPABASE_ANON_KEY in .env.local
 // RLS must be disabled (or policies set to allow all) on tiktok_projects and tiktok_clips.
 
-import { cleanLook } from "./types";
+import { cleanEffects, cleanLook } from "./types";
 import type { Caption, CaptionStyle, Clip, LibraryClip, Project, ProjectCard, TransitionType } from "./types";
 
 const BASE = process.env.SUPABASE_URL!;
@@ -41,6 +41,7 @@ function rowToProject(row: any): Project {
     captions: Array.isArray(row.captions) ? row.captions : [],
     captionStyle: row.caption_style ?? "tiktok",
     look: cleanLook(row.look),
+    effects: cleanEffects(row.effects),
     budgetCents: row.budget_cents ?? 500,
     spentCents: row.spent_cents ?? 0,
     createdAt: row.created_at,
@@ -125,7 +126,7 @@ export async function createProject(title: string): Promise<Project> {
 
 export async function updateProject(
   id: string,
-  patch: Partial<Pick<Project, "title" | "aiDisclosure" | "hashtags" | "durationMs" | "voiceoverScript" | "voiceoverUrl" | "captions" | "captionStyle" | "look" | "spentCents" | "musicUrl" | "musicName" | "musicVolume" | "musicFadeMs">>,
+  patch: Partial<Pick<Project, "title" | "aiDisclosure" | "hashtags" | "durationMs" | "voiceoverScript" | "voiceoverUrl" | "captions" | "captionStyle" | "look" | "effects" | "spentCents" | "musicUrl" | "musicName" | "musicVolume" | "musicFadeMs">>,
 ): Promise<Project | null> {
   const body: Record<string, unknown> = { updated_at: new Date().toISOString() };
   if (typeof patch.title === "string") body.title = patch.title.trim() || "Untitled video";
@@ -137,6 +138,7 @@ export async function updateProject(
   if (Array.isArray(patch.captions)) body.captions = patch.captions as Caption[];
   if (typeof patch.captionStyle === "string") body.caption_style = patch.captionStyle as CaptionStyle;
   if (patch.look) body.look = cleanLook(patch.look);
+  if (Array.isArray(patch.effects)) body.effects = cleanEffects(patch.effects);
   if (typeof patch.spentCents === "number") body.spent_cents = patch.spentCents;
   if (typeof patch.musicUrl === "string") body.music_url = patch.musicUrl;
   if (typeof patch.musicFadeMs === "number") body.music_fade_ms = Math.min(5000, Math.max(0, Math.round(patch.musicFadeMs)));
@@ -387,6 +389,7 @@ export async function duplicateProject(id: string): Promise<Project | null> {
       captions: src.captions,
       caption_style: src.captionStyle,
       look: src.look,
+      effects: src.effects,
       budget_cents: src.budgetCents,
       spent_cents: 0,
       created_at: now,
